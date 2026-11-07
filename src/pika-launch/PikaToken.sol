@@ -376,11 +376,12 @@ contract PikaToken is OpenFourToken {
     // ---------------------------------------------------------------------------------------------------------
 
     /// @notice Pays everything trades booked since the last push, in both assets. Open to anyone; trades never push.
+    ///         `lastPushAt` moves only when something was paid (audit 2026-11-07, U-9).
     function pushFees() external {
-        lastPushAt = uint64(block.timestamp);
         address q = _quote;
-        _push(address(this), true, q);
-        _push(q, false, q);
+        bool paid = _push(address(this), true, q);
+        if (_push(q, false, q)) paid = true;
+        if (paid) lastPushAt = uint64(block.timestamp);
     }
 
     /// @notice Pays out everything accrued for the creator's fee wallet, in both assets, to `to`, after pushing the
@@ -490,13 +491,13 @@ contract PikaToken is OpenFourToken {
     /// @dev Pays one asset's booked fees: the platform part and the cut to the treasury, the project part to the
     ///      slots by their shares and the rest to the creator's claimable share. The snapshot is cleared (each part
     ///      back to its zero marker) before any transfer or notification; any failure rolls the clearing and all
-    ///      payouts back together.
-    function _push(address asset, bool buy, address q) private {
+    ///      payouts back together. Returns whether anything was paid.
+    function _push(address asset, bool buy, address q) private returns (bool) {
         FeeBook storage stored = books[asset];
         uint256 platform = _amount(stored.platform);
         uint256 cut = _amount(stored.cut);
         uint256 project = _amount(stored.project);
-        if (platform == 0 && cut == 0 && project == 0) return;
+        if (platform == 0 && cut == 0 && project == 0) return false;
         if (platform != 0) stored.platform = 1;
         if (cut != 0 || project != 0) (stored.cut, stored.project) = (1, 1);
         if (platform + cut != 0) _pay(asset, treasury, platform + cut, q);
@@ -514,6 +515,7 @@ contract PikaToken is OpenFourToken {
             if (left != 0) creatorFees[asset] += left;
         }
         emit FeesPushed(asset, platform, cut, project);
+        return true;
     }
 
     function _pay(address asset, address to, uint256 amount, address q) private {

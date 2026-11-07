@@ -5,7 +5,16 @@
 Pika 是基于 [OpenFour](https://four.meme) 的发射平台。发射由 OpenFour Core 按 Pika 组合创建，在 OpenFour 的
 bonding 曲线上交易（内盘）；售罄后毕业进带 Pika Hook 的 Pancake Infinity 集中流动性池（外盘）。
 
-本仓库是提交 OpenFour 审核的合约和测试。协议版本 12；合约版本见 `package.json`，每个版本打 tag（`v12.2.0`）。
+本仓库是提交 OpenFour 审核的合约和测试。协议版本 12；合约版本见 `package.json`，每个版本打 tag（`v12.3.0`）。
+
+## v12.3.0 的改动（相对 v12.2.0）
+
+2026-11-07 重新审计（主仓库 `docs/audit-2026-11-07-fresh-review.md`）带来的三处行为改动；接口、存储布局和事件都没变。
+
+- **集中区间的流动性只许本发射的挂单合约加（U-1）。** LP 费为 0 的池子上，集中区间的仓位不赚任何东西，只能当限价单用，经 Pancake 仓位合约加的就是免费挂单。`PikaHook.beforeAddLiquidity` 现在只在持锁方是该发射的 `orderManager()`（领取时收费）时放行非全区间的仓位。全区间仓位继续对所有人开放（毕业 NFT、流动性应用、第三方）：它在任何价位都是双边的，当不了挂单。撤仓仍不经 Hook。
+- **分红排除名单不再没收钱包的分红（U-2）。** `PikaDividendApp`（模板 v12）的 `setExcluded(token, account, true)` 先清掉该地址的份额，再结算它已赚到的：没有代码的地址当场付给它（走领取路径，发 `DividendClaimed`）；合约地址的收益照旧退回该发射的未释放池，因为池子领不了。owner 不能再拿走钱包已赚的分红。
+- **空推送不改 `lastPushAt`（U-9）。** `PikaToken.pushFees` 只在实际付了款时记录时间，没有东西可推的推送不会把 keeper 的"上次付款"年龄清零。
+- **审核合约中改动的：** 代币（`pushFees`）。中枢、`PikaTokenModule`、`PikaMigrateModule` 没改。
 
 ## v12.2.0 的改动（相对 v12.0.0）
 
@@ -132,7 +141,7 @@ git clone https://github.com/pika-meme/pika-contracts.git && cd pika-contracts
 git submodule update --init          # 不要 --recursive：依赖自己的子模块只需要下面两个
 git -C lib/pancake-infinity-periphery submodule update --init lib/permit2
 git -C lib/pancake-infinity-core submodule update --init lib/solmate
-npm ci                               # Node 20 或 22
+npm ci                               # Node ≥ 22.13（Hardhat 已拒绝 Node 20）
 npx hardhat compile                  # 发布产物
 FOUNDRY_PROFILE=lite forge test      # 本地快速用例（所有合约都用 Foundry 自己编的）
 forge test                           # via-IR；审核的四个合约从 Hardhat 产物部署

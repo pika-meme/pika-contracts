@@ -5,6 +5,8 @@ import { Vm } from "forge-std/Vm.sol";
 import { PoolKey } from "infinity-core/src/types/PoolKey.sol";
 import { PoolId } from "infinity-core/src/types/PoolId.sol";
 import { PikaInfinityFixture } from "../pika-launch/helpers/PikaInfinityFixture.sol";
+import { PikaHook } from "../../src/pika-market/infinity/PikaHook.sol";
+import { ICLHooks } from "infinity-core/src/pool-cl/interfaces/ICLHooks.sol";
 import { PikaToken } from "../../src/pika-launch/PikaToken.sol";
 import { PikaLaunchFactory } from "../../src/pika-launch/PikaLaunchFactory.sol";
 import { AppBinding } from "../../src/pika-apps/interfaces/IPikaApps.sol";
@@ -65,7 +67,7 @@ contract PikaOpenLiquidityTest is PikaInfinityFixture {
         assertEq(_poolLiquidity(token), _burnedLiquidity(token));
     }
 
-    function testAnyoneAddsAndRemovesLiquidityFeeFree() public {
+    function testAnyoneAddsAndRemovesFullRangeLiquidityFeeFree() public {
         PikaToken token = _graduated(true);
         (, int24 tick,,) = manager.getSlot0(token.poolId());
         tick = _onSpacing(tick);
@@ -74,22 +76,25 @@ contract PikaOpenLiquidityTest is PikaInfinityFixture {
         uint256 unpaidMeme = _unpaid(token, address(token));
         uint128 burned = _burnedLiquidity(token);
 
-        // A two-sided range around the price and a full-range position, both by plain wallets.
-        (uint256 narrow, uint128 narrowLiquidity) =
-            _lpMintMeme(token, ALICE, tick - 500, tick + 500, 100_000 ether, 10 ether);
+        // A concentrated range is a limit order, and only the launch's order manager places those (audit 2026-11-07,
+        // U-1): a plain wallet's range around the price is refused by the hook, through Pancake's position manager too.
+        (uint256 a0, uint256 a1) =
+            token.memeIsCurrency0() ? (uint256(100_000 ether), uint256(10 ether)) : (uint256(10 ether), uint256(100_000 ether));
+        PoolKey memory key = token.poolKey();
+        vm.expectRevert(_hookError(ICLHooks.beforeAddLiquidity.selector, abi.encodeWithSelector(PikaHook.UnauthorizedSender.selector, address(positionManager))));
+        this.lpMintAs(key, ALICE, tick - 500, tick + 500, a0, a1);
+        // A full-range position by a plain wallet is fine.
         (uint256 wide, uint128 wideLiquidity) =
             _lpMintMeme(token, ALICE, FULL_LOWER, FULL_UPPER, 100_000 ether, 10 ether);
-        assertEq(positionManager.ownerOf(narrow), ALICE);
         assertEq(positionManager.ownerOf(wide), ALICE);
-        assertEq(_poolLiquidity(token), burned + narrowLiquidity + wideLiquidity);
+        assertEq(_poolLiquidity(token), burned + wideLiquidity);
 
-        // Swaps pay the hook's fees as before; the positions earn nothing (the pool has no LP fee).
+        // Swaps pay the hook's fees as before; the position earns nothing (the pool has no LP fee).
         _swap(token, CAROL, false, 50 ether);
         _swap(token, CAROL, true, token.balanceOf(CAROL) / 2);
         unpaidQuote = _unpaid(token, address(usdt));
         unpaidMeme = _unpaid(token, address(token));
 
-        _lpDecrease(positionManager, narrow, ALICE, narrowLiquidity, ALICE);
         _lpDecrease(positionManager, wide, ALICE, wideLiquidity, ALICE);
         assertEq(_unpaid(token, address(usdt)), unpaidQuote, "taking liquidity out books no fee");
         assertEq(_unpaid(token, address(token)), unpaidMeme, "in either asset");
@@ -100,9 +105,7 @@ contract PikaOpenLiquidityTest is PikaInfinityFixture {
 
     function testOnlyTheOwnerOfAnNftTakesItOut() public {
         PikaToken token = _graduated(true);
-        (, int24 tick,,) = manager.getSlot0(token.poolId());
-        (uint256 id, uint128 liquidity) =
-            _lpMintMeme(token, ALICE, _onSpacing(tick) + 50, _onSpacing(tick) + 300, 10_000 ether, 0);
+        (uint256 id, uint128 liquidity) = _lpMintMeme(token, ALICE, FULL_LOWER, FULL_UPPER, 10_000 ether, 1 ether);
         vm.expectRevert();
         this.lpDecreaseAs(id, CAROL, liquidity);
         this.lpDecreaseAs(id, ALICE, liquidity);

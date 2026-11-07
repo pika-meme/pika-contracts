@@ -7,7 +7,27 @@ Pika preset and trades on OpenFour's bonding curve (the inner market). When the 
 Pancake Infinity concentrated-liquidity pool guarded by Pika's hook (the outer market).
 
 This repository holds the contracts and tests submitted for OpenFour's review. Protocol version 12; the contracts
-version is in `package.json` and each release is tagged (`v12.2.0`).
+version is in `package.json` and each release is tagged (`v12.3.0`).
+
+## Changes in v12.3.0 (since v12.2.0)
+
+Three behaviour changes from the 2026-11-07 fresh audit (`docs/audit-2026-11-07-fresh-review.md` in the main
+repository); no interface, storage-layout or event change.
+
+- **Concentrated liquidity only from the launch's order manager (U-1).** On a pool without an LP fee a concentrated
+  position earns nothing and is only ever a limit order, and one added through Pancake's position manager was a
+  fee-free one. `PikaHook.beforeAddLiquidity` now admits a position that is not the full range only when the locker
+  is the launch's `orderManager()`, which charges the launch's fee when the order is claimed. Full-range positions
+  stay open to everyone (the graduation NFT, the liquidity sink, third parties): two-sided at every price, they cannot
+  stand in for an order. Removing is still not hooked.
+- **Dividend exclusion pays wallets (U-2).** `PikaDividendApp` (template v12) `setExcluded(token, account, true)`
+  zeroes the account's shares and settles what it earned: an account without code is paid at once through the claim
+  path (`DividendClaimed`); a contract's earnings return to the launch's unreleased fees as before, since a pool cannot
+  claim. The owner can no longer take a wallet's earned dividends.
+- **Empty fee pushes leave `lastPushAt` alone (U-9).** `PikaToken.pushFees` records the time only when it paid
+  something, so the keeper's "last paid" age is not reset by a push that found nothing booked.
+- **Reviewed contracts touched:** the token (`pushFees`). The hub, `PikaTokenModule` and `PikaMigrateModule` are
+  unchanged.
 
 ## Changes in v12.2.0 (since v12.0.0)
 
@@ -174,7 +194,7 @@ git clone https://github.com/pika-meme/pika-contracts.git && cd pika-contracts
 git submodule update --init          # not --recursive: only two of the dependencies' own submodules are needed
 git -C lib/pancake-infinity-periphery submodule update --init lib/permit2
 git -C lib/pancake-infinity-core submodule update --init lib/solmate
-npm ci                               # Node 20 or 22
+npm ci                               # Node 22.13 or later (Hardhat refuses Node 20)
 npx hardhat compile                  # release artifacts
 FOUNDRY_PROFILE=lite forge test      # fast local suite (Foundry's own build of every contract)
 forge test                           # via-IR; deploys the four reviewed contracts from the Hardhat artifacts

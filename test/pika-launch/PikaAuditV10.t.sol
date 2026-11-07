@@ -78,11 +78,9 @@ contract PikaAuditV10Test is PikaInfinityFixture {
         assertGt(_unpaid(token, address(usdt)), quoteUnpaidBefore);
         _assertBooksMatchBalances(token);
 
-        // A third-party LP position (a Pancake LP NFT, anyone's since 2026-11-07) withdrawn as a net sell books
-        // nothing: liquidity is fee-free, only swaps pay.
-        (, tick,,) = manager.getSlot0(token.poolId());
-        tick = _onSpacing(tick);
-        (uint256 positionId, uint128 liquidity) = _lpMintMeme(token, ALICE, tick + 100, tick + 200, 10_000 ether, 0);
+        // A third-party full-range LP position (a Pancake LP NFT, anyone's) withdrawn books nothing: liquidity is
+        // fee-free, only swaps pay.
+        (uint256 positionId, uint128 liquidity) = _lpMintMeme(token, ALICE, FULL_LOWER, FULL_UPPER, 10_000 ether, 1 ether);
         _swap(token, CAROL, false, 300 ether); // pushes
         quoteUnpaidBefore = _unpaid(token, address(usdt));
         uint256 memeUnpaidBefore = _unpaid(token, address(token));

@@ -34,8 +34,11 @@ import { IPikaLaunchToken, IPikaHook } from "../interfaces/IPikaMarket.sol";
 
 /// @notice The hook of every Pika pool on Pancake Infinity, shared by all launches of one factory.
 /// @dev It decides who may initialize a launch pool and which ranges liquidity may take, and it takes both trade fees
-///      inside the swap. Liquidity is open to everyone once the pool trades (Pancake's position manager or any vault
-///      locker), adding and removing alike; the pool charges no LP fee. Pika has no price limits and no venue lock:
+///      inside the swap. The pool charges no LP fee, so a concentrated position earns nothing and is only ever a
+///      limit order: such positions come from the launch's order manager alone, where a fill pays the launch's fee on
+///      claim (audit 2026-11-07, U-1). Full-range positions are open to everyone (Pancake's position manager or any
+///      vault locker): they are two-sided at every price, so they cannot stand in for an order. Removing is open to
+///      every position's owner. Pika has no price limits and no venue lock:
 ///      the token trades on any pool, any locker may swap on the launch pool, and meme crosses the vault boundary as
 ///      a plain ERC20. Every fee is
 ///      taken from the swap's own deltas, never on the ERC20 boundary, so a locker that keeps its meme inside the
@@ -185,15 +188,18 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
         revert InvalidConfiguration();
     }
 
-    /// @dev Anyone may add liquidity once the pool trades. A position that touches either end of the usable tick range
-    ///      (`MIN_USABLE_TICK`, `MAX_USABLE_TICK`) must span all of it: a few wei in a narrow range at either end would
-    ///      otherwise fill that tick's liquidity cap and stop every later full-range position (the burned graduation
-    ///      position's top-ups among them), while filling the cap with full-range liquidity would take millions of
-    ///      times the pool's reserves. Before trading the only liquidity is the hub's full-range graduation position,
-    ///      minted inside graduation. Removing is not hooked: a position's owner may always take it out, and nobody
-    ///      owns the burned ones.
+    /// @dev Full-range positions are open to anyone, at any time (the hub's graduation position and the liquidity
+    ///      sink's top-ups are minted this way, through Pancake's position manager). Any other range may only come from
+    ///      the launch's order manager, the locker of every limit order, which charges the launch's fee when the order
+    ///      is claimed: on a pool without an LP fee a concentrated position is nothing but a limit order, and one added
+    ///      from anywhere else would be a fee-free one (audit 2026-11-07, U-1). The order manager exists only once the
+    ///      launch graduated, so nothing else is added before trading starts. A position that touches either end of
+    ///      the usable tick range (`MIN_USABLE_TICK`, `MAX_USABLE_TICK`) must span all of it: a few wei in a narrow
+    ///      range at either end would otherwise fill that tick's liquidity cap and stop every later full-range position,
+    ///      while filling the cap with full-range liquidity would take millions of times the pool's reserves. Removing
+    ///      is not hooked: a position's owner may always take it out, and nobody owns the burned ones.
     function beforeAddLiquidity(
-        address,
+        address sender,
         PoolKey calldata key,
         ICLPoolManager.ModifyLiquidityParams calldata params,
         bytes calldata
@@ -202,7 +208,9 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
         bool low = params.tickLower == MIN_USABLE_TICK;
         bool high = params.tickUpper == MAX_USABLE_TICK;
         if (low != high) revert InvalidRange();
-        if (!low && !_token(key).tradingStarted()) revert TradingNotStarted();
+        // `sender` is the locker that called `modifyLiquidity`: the order manager itself for an order, Pancake's
+        // position manager for an LP NFT. Zero before graduation, when no order manager exists yet.
+        if (!low && sender != _token(key).orderManager()) revert UnauthorizedSender(sender);
         return this.beforeAddLiquidity.selector;
     }
 

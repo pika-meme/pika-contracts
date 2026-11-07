@@ -51,6 +51,25 @@ contract PikaAutoPushTest is PikaInfinityFixture {
         return false;
     }
 
+    /// @dev A push that finds nothing booked pays nothing and leaves `lastPushAt` alone, so the keeper's "last paid"
+    ///      age keeps counting (audit 2026-11-07, U-9).
+    function testAnEmptyPushLeavesLastPushAtAlone() public {
+        PikaToken token = _launch();
+        uint64 opened = token.lastPushAt();
+        _wait(2 days);
+        vm.prank(EVE);
+        token.pushFees();
+        assertEq(token.lastPushAt(), opened, "nothing paid, nothing recorded");
+        // The creator's claim pushes first; with nothing booked that push records nothing either.
+        vm.prank(CREATOR);
+        token.claimCreatorFees(CREATOR);
+        assertEq(token.lastPushAt(), opened);
+        _directSwap(token, CAROL, false, 300 ether);
+        _wait(1 hours);
+        token.pushFees();
+        assertEq(token.lastPushAt(), vm.getBlockTimestamp(), "a paying push is recorded");
+    }
+
     function testTradesOnlyBookAndAnyonePushes() public {
         PikaToken token = _launch();
         uint64 opened = token.lastPushAt();
