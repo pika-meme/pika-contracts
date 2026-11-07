@@ -36,7 +36,7 @@ contract PikaRouter is PikaFactoryBound, ReentrancyGuardTransient, ILockCallback
     using TransientSlot for *;
 
     /// @notice Interface generation required by the current component release.
-    uint32 public constant FEE_PROTOCOL_VERSION = 4;
+    uint32 public constant FEE_PROTOCOL_VERSION = 5;
 
     struct SwapParams {
         address token;

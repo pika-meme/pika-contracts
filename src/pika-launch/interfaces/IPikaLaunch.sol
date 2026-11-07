@@ -42,12 +42,12 @@ interface IPikaHub {
     }
 
     /// @notice What the hub hands a newly registered token: the components pinned for it and its fee slots.
+    /// @dev `positionManager` is Pancake's CL position manager (the LP NFT), a platform account of the launch.
     struct Setup {
         address treasury;
-        address locker;
         address hook;
         address router;
-        address lpManager;
+        address positionManager;
         address holderBook;
         FeeSlot[] slots;
     }

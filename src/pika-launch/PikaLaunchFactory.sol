@@ -17,8 +17,9 @@ import { PikaGuarded } from "../common/PikaGuarded.sol";
 import { PikaFeeMath } from "../common/libraries/PikaFeeMath.sol";
 import { PikaToken } from "./PikaToken.sol";
 import { PikaGraduationMath } from "./libraries/PikaGraduationMath.sol";
+import { PikaBurnedLiquidity } from "../common/libraries/PikaBurnedLiquidity.sol";
 import {
-    IPikaFactoryBound, IPikaHook, IPikaLocker, IPikaLpManager, IPikaOrderDeployer
+    IPikaFactoryBound, IPikaHook, IPikaOrderDeployer, IPikaPositionManager
 } from "../pika-market/interfaces/IPikaMarket.sol";
 import { IPikaHub, PikaTokenParams } from "./interfaces/IPikaLaunch.sol";
 import { FeeSlot, IPikaLaunchAppRegistry } from "../pika-apps/interfaces/IPikaApps.sol";
@@ -30,8 +31,8 @@ import { IOpenFourVault } from "../openfour/interfaces/IOpenFourVault.sol";
 ///         modules) from the Pika preset and runs OpenFour's standard vault, bonding curve and trade policy
 ///         (`module.vault.standard`, `module.curve.bonding`, `module.trade.simple`); the hub holds what Pika adds around it: the owner's launch rules (quotes,
 ///         minimum targets, supply, app registry, outer components), the creation check Core runs as the preset's
-///         validator, the launch registry every outer component trusts, and graduation into the launch's
-///         permanently locked Pancake Infinity pool.
+///         validator, the launch registry every outer component trusts, and graduation into the launch's Pancake
+///         Infinity pool, whose full-range opening position is minted to the burn address.
 /// @dev The contract keeps the name `PikaLaunchFactory`: every outer component is bound to it as its "factory".
 ///
 ///      Trust: a token registers itself while it initializes. The hub accepts only an EIP-1167 clone of a Pika token
@@ -67,13 +68,13 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     uint256 public constant MIN_TARGET_FLOOR = 1e15;
 
     /// @notice Shared trading and graduation components. Every change publishes a new version; a launch pins the
-    ///         version current at its registration.
+    ///         version current at its registration. `positionManager` is Pancake's official CL position manager
+    ///         (the LP NFT): graduation mints the opening position through it to the burn address.
     struct Components {
         address router;
-        address locker;
         address orderDeployer;
         address hook;
-        address lpManager;
+        address positionManager;
     }
 
     struct QuoteConfig {
@@ -127,6 +128,10 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     /// @notice OpenFour Cores whose records graduation trusts. `setCore` adds the new Core and keeps the earlier
     ///         ones, whose launches may still be on their curves.
     mapping(address core => bool) public graduationCores;
+    /// @notice Graduation quote owed to the treasury, by asset across launches: the raise outside the pool and the
+    ///         creator's share, and whatever else the vault held. Claimed separately (`claimTreasuryQuote`), so a
+    ///         treasury payment can never block graduation.
+    mapping(address asset => uint256 amount) public pendingTreasuryQuote;
 
     error InvalidConfiguration();
     error WrongPhase();
@@ -148,7 +153,7 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         uint16 sellFeeBps,
         address holderBook
     );
-    /// @dev `orders` is the launch's order manager; `liquidity` is the locked graduation position.
+    /// @dev `orders` is the launch's order manager; `liquidity` is the burned graduation position.
     event PoolGraduated(
         address indexed token,
         address indexed orders,
@@ -162,6 +167,19 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     event CreatorGraduationReward(address indexed token, address indexed recipient, uint256 amount);
     /// @notice The launch pool opened at graduation.
     event PoolOpened(address indexed token, bytes32 indexed poolId, PoolKey poolKey, uint160 sqrtPriceX96);
+    /// @notice The graduation position: Pancake LP NFT `positionId`, full range, owned by the burn address.
+    ///         `memeUsed` and `quoteUsed` are what it holds at the opening price; `memeBurned` is every other token
+    ///         the vault handed over (the curve's unsold remainder), sent to the burn address.
+    event GraduationPositionBurned(
+        address indexed token,
+        uint256 indexed positionId,
+        uint128 liquidity,
+        uint256 memeUsed,
+        uint256 quoteUsed,
+        uint256 memeBurned
+    );
+    event TreasuryQuoteAccrued(address indexed token, address indexed asset, uint256 amount);
+    event TreasuryQuoteClaimed(address indexed asset, address indexed treasury, uint256 amount);
     event LaunchEnabled(bool enabled);
     event CoreUpdated(address indexed previousCore, address indexed newCore);
     event AppRegistryUpdated(address indexed previousRegistry, address indexed newRegistry);
@@ -171,12 +189,7 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     event GraduationPresetSet(uint256 indexed presetId, bool allowed);
     event GraduationCoreSet(address indexed core, bool allowed);
     event ComponentsUpdated(
-        uint32 indexed version,
-        address router,
-        address locker,
-        address orderDeployer,
-        address hook,
-        address lpManager
+        uint32 indexed version, address router, address orderDeployer, address hook, address positionManager
     );
 
     constructor(
@@ -302,26 +315,24 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     /// @notice Publish a new set of shared components for launches registered afterwards.
     function setComponents(Components calldata c) external onlyOwner {
         _requireBound(c.router);
-        _requireBound(c.locker);
         _requireBound(c.orderDeployer);
         _requireBound(c.hook);
-        if (
-            IPikaLocker(c.locker).treasury() != treasury || IPikaLocker(c.locker).vault() != vault
-                || IPikaLocker(c.locker).poolManager() != poolManager || IPikaHook(c.hook).vault() != vault
-                || IPikaHook(c.hook).poolManager() != poolManager || c.lpManager.code.length == 0
-                || IPikaLpManager(c.lpManager).vault() != vault
-                || IPikaLpManager(c.lpManager).poolManager() != poolManager
-                || address(IPikaLpManager(c.lpManager).hook()) != c.hook
-        ) revert InvalidConfiguration();
         _publish(c);
     }
 
+    /// @dev The constructor publishes components that are bound to this hub only afterwards (`PikaFactoryBound`).
     function _publish(Components memory c) private {
-        // An order deployer serves the hook its implementation was built for.
-        if (IPikaOrderDeployer(c.orderDeployer).hook() != c.hook) revert InvalidConfiguration();
+        // An order deployer serves the hook its implementation was built for; the hook and the position manager
+        // work on this hub's pool manager.
+        if (
+            IPikaOrderDeployer(c.orderDeployer).hook() != c.hook || IPikaHook(c.hook).vault() != vault
+                || IPikaHook(c.hook).poolManager() != poolManager || c.positionManager.code.length == 0
+                || IPikaPositionManager(c.positionManager).clPoolManager() != poolManager
+                || IPikaPositionManager(c.positionManager).vault() != vault
+        ) revert InvalidConfiguration();
         uint32 version = ++componentsVersion;
         components[version] = c;
-        emit ComponentsUpdated(version, c.router, c.locker, c.orderDeployer, c.hook, c.lpManager);
+        emit ComponentsUpdated(version, c.router, c.orderDeployer, c.hook, c.positionManager);
     }
 
     function _requireBound(address component) private view {
@@ -393,17 +404,16 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         if (
             recipient == token || recipient == r.quoteAsset || recipient == address(vault)
                 || recipient == address(poolManager) || recipient == appRegistry || recipient == address(this)
-                || recipient == comp.router || recipient == comp.locker || recipient == comp.orderDeployer
-                || recipient == comp.hook || recipient == comp.lpManager || recipient == core
+                || recipient == comp.router || recipient == comp.orderDeployer || recipient == comp.hook
+                || recipient == comp.positionManager || recipient == core
         ) revert InvalidConfiguration();
         IPikaLaunchAppRegistry registry = IPikaLaunchAppRegistry(appRegistry);
         s.holderBook = registry.holderBookOf(r.params.apps);
         s.slots = registry.bindLaunch(token, recipient, r.params.buyFeeBps, r.params.sellFeeBps, r.params.apps);
         s.treasury = treasury;
-        s.locker = comp.locker;
         s.hook = comp.hook;
         s.router = comp.router;
-        s.lpManager = comp.lpManager;
+        s.positionManager = comp.positionManager;
         launches[token] = Launch(r.quoteAsset, Phase.Internal, version);
         emit LaunchRegistered(
             token,
@@ -445,12 +455,12 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     // ---------------------------------------------------------------------------------------------------------
 
     /// @notice Graduation of a sold-out launch in one step, called by its migrate module after it moved the vault's
-    ///         quote and tokens here: open the launch pool at the curve's final price, seed and lock a full-range
-    ///         position with the tokens the curve kept and `POOL_QUOTE_BPS` of the raise, pay the creator fee wallet
-    ///         `CREATOR_GRADUATION_BPS` of the raise, and open pool trading. `quoteAmount` is the curve's raised quote
-    ///         (it sets the price); the raise's remainder and `extraQuote` (whatever else the vault held: the
-    ///         anti-sniper surcharge, donations) are left to the locker for the treasury. The unsold remainder the
-    ///         vault may hold (at most one token) stays locked.
+    ///         quote and tokens here: open the launch pool at the curve's final price, mint a full-range position
+    ///         with the tokens the curve kept and `POOL_QUOTE_BPS` of the raise to the burn address (a Pancake LP
+    ///         NFT nobody can ever withdraw), credit the creator fee wallet `CREATOR_GRADUATION_BPS` of the raise, and
+    ///         open pool trading. `quoteAmount` is the curve's raised quote (it sets the price); the raise's remainder
+    ///         and `extraQuote` (whatever else the vault held: the anti-sniper surcharge, donations) are owed to the
+    ///         treasury (`claimTreasuryQuote`). The unsold remainder the vault may hold (at most one token) is burned.
     function graduate(address tokenAddress, uint256 quoteAmount, uint256 extraQuote)
         external
         nonReentrant
@@ -461,8 +471,10 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         (uint256 poolTokens, uint256 swept) = _checkGraduation(tokenAddress, l.quoteToken, quoteAmount, extraQuote);
         Components memory comp = components[l.componentsVersion];
         PikaToken token = PikaToken(tokenAddress);
-        poolId = _openPool(token, l.quoteToken, comp, poolTokens, quoteAmount * POOL_QUOTE_BPS / 10_000);
-        uint128 liquidity = _seedPosition(token, comp.locker, l.quoteToken, poolTokens, swept, quoteAmount, extraQuote);
+        PoolKey memory key = _openPool(token, l.quoteToken, comp, poolTokens, quoteAmount * POOL_QUOTE_BPS / 10_000);
+        poolId = PoolId.unwrap(key.toId());
+        uint128 liquidity =
+            _burnPosition(token, key, comp.positionManager, l.quoteToken, poolTokens, quoteAmount);
         token.openTrading();
         launches[tokenAddress].phase = Phase.External;
         emit PoolGraduated(tokenAddress, token.orderManager(), comp.router, liquidity, quoteAmount, swept);
@@ -490,9 +502,10 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         if (!IOpenFourVault(record.vault).isSoldOut()) revert WrongPhase();
         swept = IERC20(tokenAddress).balanceOf(address(this));
         poolTokens = record.maxSupply - record.saleAmount;
+        // The hub also holds the treasury's pending graduation quote; only what is above it came with this launch.
         if (
             quoteAmount * POOL_QUOTE_BPS / 10_000 == 0 || swept < poolTokens
-                || IERC20(quote).balanceOf(address(this)) < quoteAmount + extraQuote
+                || IERC20(quote).balanceOf(address(this)) < pendingTreasuryQuote[quote] + quoteAmount + extraQuote
         ) revert InvalidConfiguration();
         if (vault.getLocker() != address(0)) revert VaultLocked();
     }
@@ -501,14 +514,13 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     ///      price and attaches its order manager.
     function _openPool(PikaToken token, address quote, Components memory comp, uint256 poolTokens, uint256 poolQuote)
         private
-        returns (bytes32 poolId)
+        returns (PoolKey memory key)
     {
         uint160 price = _openingPrice(address(token) < quote, poolTokens, poolQuote);
-        PoolKey memory key = IPikaHook(comp.hook).registerPool(address(token), quote);
+        key = IPikaHook(comp.hook).registerPool(address(token), quote);
         poolManager.initialize(key, price);
         token.configureOuter(IPikaOrderDeployer(comp.orderDeployer).deploy(address(token)));
-        poolId = PoolId.unwrap(key.toId());
-        emit PoolOpened(address(token), poolId, key, price);
+        emit PoolOpened(address(token), PoolId.unwrap(key.toId()), key, price);
     }
 
     /// @dev Credits the creator fee wallet its share of the raise in the quote asset. It is not paid out here: a
@@ -521,28 +533,45 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         emit CreatorGraduationReward(address(token), token.creatorFeeRecipient(), reward);
     }
 
-    /// @dev Credits the creator fee wallet its share, then hands every token and the remaining quote to the locker,
-    ///      which seeds the full-range position at the pool's price (the pool's tokens and `POOL_QUOTE_BPS` of the
-    ///      raise) and keeps the rest locked (meme) or owed to the treasury (quote).
-    function _seedPosition(
+    /// @dev Credits the creator fee wallet its share, mints the full-range opening position (the pool's tokens and
+    ///      `POOL_QUOTE_BPS` of the raise) through Pancake's position manager to the burn address, sends every other
+    ///      token the vault handed over to the burn address too, and books the remaining quote (the rest of the raise,
+    ///      whatever else the vault held, rounding) for the treasury.
+    function _burnPosition(
         PikaToken token,
-        address locker,
+        PoolKey memory key,
+        address positionManager,
         address quote,
         uint256 poolTokens,
-        uint256 swept,
-        uint256 quoteAmount,
-        uint256 extraQuote
+        uint256 quoteAmount
     ) private returns (uint128 liquidity) {
-        uint256 quoteIn = quoteAmount + extraQuote - _payCreator(token, quote, quoteAmount);
-        IERC20(address(token)).safeTransfer(locker, swept);
-        IERC20(quote).safeTransfer(locker, quoteIn);
-        uint256 usedMeme;
-        uint256 usedQuote;
-        (liquidity, usedMeme, usedQuote) = IPikaLocker(locker).lockPosition(address(token), poolTokens, quoteIn);
-        if (usedMeme < poolTokens * 9999 / 10_000 || usedQuote < quoteAmount * POOL_QUOTE_BPS / 10_000 * 9999 / 10_000)
-        {
+        _payCreator(token, quote, quoteAmount);
+        uint256 poolQuote = quoteAmount * POOL_QUOTE_BPS / 10_000;
+        (uint256 positionId, uint128 minted, uint256 memeUsed, uint256 quoteUsed) = PikaBurnedLiquidity.mint(
+            IPikaPositionManager(positionManager), poolManager, key, token.memeIsCurrency0(), poolTokens, poolQuote
+        );
+        if (memeUsed < poolTokens * 9999 / 10_000 || quoteUsed < poolQuote * 9999 / 10_000) {
             revert InvalidConfiguration();
         }
+        liquidity = minted;
+        uint256 memeBurned = IERC20(address(token)).balanceOf(address(this));
+        if (memeBurned != 0) IERC20(address(token)).safeTransfer(PikaBurnedLiquidity.BURN, memeBurned);
+        uint256 owed = IERC20(quote).balanceOf(address(this)) - pendingTreasuryQuote[quote];
+        if (owed != 0) {
+            pendingTreasuryQuote[quote] += owed;
+            emit TreasuryQuoteAccrued(address(token), quote, owed);
+        }
+        emit GraduationPositionBurned(address(token), positionId, liquidity, memeUsed, quoteUsed, memeBurned);
+    }
+
+    /// @notice Anyone may pay the graduation quote owed to the treasury in one asset. The debt is cleared before the
+    ///         payment; a failed transfer reverts and leaves it for a retry.
+    function claimTreasuryQuote(address asset) external nonReentrant returns (uint256 amount) {
+        amount = pendingTreasuryQuote[asset];
+        if (amount == 0) return 0;
+        pendingTreasuryQuote[asset] = 0;
+        IERC20(asset).safeTransfer(treasury, amount);
+        emit TreasuryQuoteClaimed(asset, treasury, amount);
     }
 
     /// @notice The current Core's runtime record of `token` (`OpenFourCore.tokens`).

@@ -11,6 +11,8 @@ import { PoolKey } from "infinity-core/src/types/PoolKey.sol";
 import { PoolId } from "infinity-core/src/types/PoolId.sol";
 import { Currency } from "infinity-core/src/types/Currency.sol";
 import { BalanceDelta } from "infinity-core/src/types/BalanceDelta.sol";
+import { Hooks } from "infinity-core/src/libraries/Hooks.sol";
+import { CustomRevert } from "infinity-core/src/libraries/CustomRevert.sol";
 import { PikaLaunchFactory } from "../../../src/pika-launch/PikaLaunchFactory.sol";
 import { PikaToken } from "../../../src/pika-launch/PikaToken.sol";
 import { PikaTokenParams } from "../../../src/pika-launch/interfaces/IPikaLaunch.sol";
@@ -18,11 +20,10 @@ import { OpenFourTypes } from "../../../src/openfour/libraries/OpenFourTypes.sol
 import { IOpenFourVault } from "../../../src/openfour/interfaces/IOpenFourVault.sol";
 import { MockOpenFourCore } from "../../helpers/MockOpenFourCore.sol";
 import { PikaRouter } from "../../../src/pika-launch/PikaRouter.sol";
-import { PikaLocker } from "../../../src/pika-market/infinity/PikaLocker.sol";
 import { PikaTradeLens } from "../../../src/pika-launch/PikaTradeLens.sol";
 import { PikaOrderDeployer } from "../../../src/pika-launch/PikaOrderDeployer.sol";
 import { PikaHook } from "../../../src/pika-market/infinity/PikaHook.sol";
-import { PikaLpManager } from "../../../src/pika-market/infinity/PikaLpManager.sol";
+import { IPikaPositionManager } from "../../../src/pika-market/interfaces/IPikaMarket.sol";
 import { PikaAppRegistry } from "../../../src/pika-apps/PikaAppRegistry.sol";
 import { PikaGuard } from "../../../src/common/PikaGuard.sol";
 import { PikaBurnApp } from "../../../src/pika-apps/PikaBurnApp.sol";
@@ -33,13 +34,13 @@ import { PikaOrderManager } from "../../../src/pika-market/infinity/PikaOrderMan
 import { MockUSDT } from "../../../src/mocks/MockUSDT.sol";
 import { MockWBNB } from "../../helpers/MockWBNB.sol";
 import { InfinityTestRouter, LockRelay } from "../../helpers/InfinityTestRouter.sol";
-import { PikaArtifacts } from "../../helpers/PikaArtifacts.sol";
+import { PikaLpHelpers } from "../../helpers/PikaLpHelpers.sol";
 import { PikaFeeMath } from "../../../src/common/libraries/PikaFeeMath.sol";
 // Imported so every suite builds the stand-in app's artifact; it is deployed with `vm.deployCode`.
 import { PikaRecorderApp } from "../../helpers/PikaRecorderApp.sol";
 
 /// @notice Local Infinity deployment (real Vault and CLPoolManager bytecode) with the whole Pika stack on top.
-abstract contract PikaInfinityFixture is PikaArtifacts {
+abstract contract PikaInfinityFixture is PikaLpHelpers {
     using SafeERC20 for IERC20;
 
     address constant ALICE = address(0xa11ce);
@@ -57,7 +58,8 @@ abstract contract PikaInfinityFixture is PikaArtifacts {
     MockUSDT usdt;
     PikaGuard guard;
     PikaAppRegistry registry;
-    PikaLpManager lpManager;
+    /// @dev Pancake's CL position manager (the official LP NFT).
+    IPikaPositionManager positionManager;
     /// @dev Three listings of the test-only recorder app, standing in for optional (non-default) apps.
     PikaRecorderApp appA;
     PikaRecorderApp appB;
@@ -77,7 +79,6 @@ abstract contract PikaInfinityFixture is PikaArtifacts {
     uint32 constant LIQUIDITY_ID = 6;
     PikaLaunchFactory factory;
     PikaRouter router;
-    PikaLocker locker;
     PikaHook hook;
     PikaTradeLens lens;
     /// @dev Shaped like the Universal Router.
@@ -144,11 +145,10 @@ abstract contract PikaInfinityFixture is PikaArtifacts {
         registry =
             PikaAppRegistry(_deploy("PikaAppRegistry", abi.encode(address(this), address(guard), address(this))));
         router = PikaRouter(payable(_newRouter(address(wbnb), address(vault), address(manager))));
-        locker = PikaLocker(_newLocker(address(vault), address(manager), TREASURY));
         hook = PikaHook(_newWithVenue("PikaHook", address(vault), address(manager)));
-        lpManager = PikaLpManager(_newLpManager(address(vault), address(manager), address(hook)));
+        positionManager = IPikaPositionManager(_newPositionManager(address(vault), address(manager), address(wbnb)));
         PikaLaunchFactory.Components memory c = PikaLaunchFactory.Components(
-            address(router), address(locker), _newDeployer("PikaOrderDeployer", address(hook)), address(hook), address(lpManager)
+            address(router), _newDeployer("PikaOrderDeployer", address(hook)), address(hook), address(positionManager)
         );
         factory = PikaLaunchFactory(
             payable(_deploy(
@@ -157,7 +157,6 @@ abstract contract PikaInfinityFixture is PikaArtifacts {
                 ))
         );
         router.bindFactory(address(factory));
-        locker.bindFactory(address(factory));
         PikaOrderDeployer(c.orderDeployer).bindFactory(address(factory));
         hook.bindFactory(address(factory));
         registry.setFactory(address(factory), true);
@@ -167,7 +166,9 @@ abstract contract PikaInfinityFixture is PikaArtifacts {
         appC = _newRecorder("appC");
         burnApp = PikaBurnApp(_newApp("PikaBurnApp", address(registry)));
         dividendApp = PikaDividendApp(_newApp("PikaDividendApp", address(registry)));
-        liquidityApp = PikaLiquidityApp(_newApp("PikaLiquidityApp", address(registry)));
+        liquidityApp = PikaLiquidityApp(
+            _proxy(_deploy("PikaLiquidityApp", abi.encode(address(registry), address(positionManager))))
+        );
         registry.addTemplate(BURN, PikaAppRegistry.Kind.Direct, "burn", 1, false);
         registry.addTemplate(address(appA), PikaAppRegistry.Kind.Contract, "appA", 2, false);
         registry.addTemplate(address(appB), PikaAppRegistry.Kind.Contract, "appB", 2, false);
@@ -176,12 +177,11 @@ abstract contract PikaInfinityFixture is PikaArtifacts {
         registry.addTemplate(
             address(dividendApp), PikaAppRegistry.Kind.HolderBook, "dividend", dividendApp.version(), true
         );
-        registry.addTemplate(address(liquidityApp), PikaAppRegistry.Kind.Contract, "liquidity", 2, true);
+        registry.addTemplate(address(liquidityApp), PikaAppRegistry.Kind.Contract, "liquidity", 3, true);
         registry.setKeeper(KEEPER, true);
         // Deployments start at one chosen app per launch (PikaProjectFees checks the default); the local suites
         // bind several to exercise the fee split.
         registry.setMaxApps(3);
-        locker.setLiquidityApp(address(liquidityApp), true);
         ur = new InfinityTestRouter(IVault(address(vault)), ICLPoolManager(address(manager)));
         stranger = new InfinityTestRouter(IVault(address(vault)), ICLPoolManager(address(manager)));
         relay = new LockRelay(IVault(address(vault)));
@@ -203,7 +203,7 @@ abstract contract PikaInfinityFixture is PikaArtifacts {
 
     function _components(address token) internal view returns (PikaLaunchFactory.Components memory c) {
         (,, uint32 version) = factory.launches(token);
-        (c.router, c.locker, c.orderDeployer, c.hook, c.lpManager) = factory.components(version);
+        (c.router, c.orderDeployer, c.hook, c.positionManager) = factory.components(version);
     }
 
     function _info(address token) internal view returns (PikaLaunchFactory.Launch memory l) {
@@ -478,5 +478,46 @@ abstract contract PikaInfinityFixture is PikaArtifacts {
 
     function _vaultBalance(PikaToken token) internal view returns (uint256) {
         return token.balanceOf(address(vault));
+    }
+
+    /// @dev The launch pool's liquidity minted to the burn address: the graduation position and every liquidity-sink
+    ///      dispatch since.
+    function _burnedLiquidity(PikaToken token) internal view returns (uint128 liquidity) {
+        (liquidity,) = _burned(positionManager, token.poolId(), 1);
+    }
+
+    /// @dev External so a test can `try` it or expect its revert: a Pancake LP NFT minted by `who`.
+    function lpMintAs(PoolKey memory key, address who, int24 lower, int24 upper, uint256 a0, uint256 a1)
+        external
+        returns (uint256 id, uint128 liquidity)
+    {
+        require(msg.sender == address(this));
+        return _lpMint(positionManager, key, who, lower, upper, a0, a1);
+    }
+
+    /// @dev External so a test can `try` it or expect its revert: `who` takes `liquidity` out of LP NFT `id`.
+    function lpDecreaseAs(uint256 id, address who, uint128 liquidity) external {
+        require(msg.sender == address(this));
+        _lpDecrease(positionManager, id, who, liquidity, who);
+    }
+
+    /// @dev The revert the pool manager raises when the launch hook refuses `callback` with `reason`.
+    function _hookError(bytes4 callback, bytes memory reason) internal view returns (bytes memory) {
+        return abi.encodeWithSelector(
+            CustomRevert.WrappedError.selector,
+            address(hook),
+            callback,
+            reason,
+            abi.encodePacked(Hooks.HookCallFailed.selector)
+        );
+    }
+
+    /// @dev `who` mints a Pancake LP NFT on the launch pool from meme and quote amounts.
+    function _lpMintMeme(PikaToken token, address who, int24 lower, int24 upper, uint256 meme, uint256 quote)
+        internal
+        returns (uint256 id, uint128 liquidity)
+    {
+        (uint256 a0, uint256 a1) = token.memeIsCurrency0() ? (meme, quote) : (quote, meme);
+        return _lpMint(positionManager, token.poolKey(), who, lower, upper, a0, a1);
     }
 }

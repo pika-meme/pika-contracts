@@ -9,12 +9,11 @@ import { Ownable2Step } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { MockUSDT } from "../src/mocks/MockUSDT.sol";
 import { PikaLaunchFactory } from "../src/pika-launch/PikaLaunchFactory.sol";
 import { PikaToken } from "../src/pika-launch/PikaToken.sol";
-import { PikaLocker } from "../src/pika-market/infinity/PikaLocker.sol";
 import { PikaRouter } from "../src/pika-launch/PikaRouter.sol";
 import { PikaTradeLens } from "../src/pika-launch/PikaTradeLens.sol";
 import { PikaOrderDeployer } from "../src/pika-launch/PikaOrderDeployer.sol";
 import { PikaHook } from "../src/pika-market/infinity/PikaHook.sol";
-import { PikaLpManager } from "../src/pika-market/infinity/PikaLpManager.sol";
+import { PikaLiquidityApp } from "../src/pika-apps/PikaLiquidityApp.sol";
 import { PikaGuard } from "../src/common/PikaGuard.sol";
 import { PikaTokenModule } from "../src/pika-launch/openfour/PikaTokenModule.sol";
 import { PikaMigrateModule } from "../src/pika-launch/openfour/PikaMigrateModule.sol";
@@ -76,6 +75,8 @@ contract DeployPikaTestnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
     uint256 internal constant MIN_TARGET_USDT = 10 ether;
     address public constant VAULT = 0x2CdB3EC82EE13d341Dc6E73637BE0Eab79cb79dD;
     address public constant CL_POOL_MANAGER = 0x36A12c70c9Cf64f24E89ee132BF93Df2DCD199d4;
+    /// @dev Pancake's official CL position manager on BSC testnet (the LP NFT).
+    address public constant CL_POSITION_MANAGER = 0x77DedB52EC6260daC4011313DBEE09616d30d122;
     address public constant WBNB = 0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd;
 
     struct Modules {
@@ -120,8 +121,8 @@ contract DeployPikaTestnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         vm.startBroadcast(key);
         d.quote = existingQuote == address(0) ? new MockUSDT(deployer) : MockUSDT(existingQuote);
         d.guard = new PikaGuard(deployer);
-        d.apps = _deployApps(deployer, address(d.guard), owner, upgradeDelay);
-        d.components = _deployComponents(treasury);
+        d.apps = _deployApps(deployer, address(d.guard), owner, upgradeDelay, CL_POSITION_MANAGER);
+        d.components = _deployComponents();
         d.hub = PikaLaunchFactory(
             payable(
                 PikaRelease.deploy(
@@ -141,7 +142,7 @@ contract DeployPikaTestnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         _bind(d);
         d.guard.setGuardian(guardian);
         _listApps(d.apps);
-        _configureSinks(d.apps, d.components.locker, vm.envOr("PONS_KEEPER", deployer));
+        _configureSinks(d.apps, vm.envOr("PONS_KEEPER", deployer));
         d.hub.setCore(core);
         d.modules = _deployModules(address(d.hub), core);
         d.hub.setTokenImplementation(d.modules.tokenImpl, true);
@@ -159,20 +160,18 @@ contract DeployPikaTestnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         _log(d, core, deployer, treasury);
     }
 
-    function _deployComponents(address treasury) internal returns (PikaLaunchFactory.Components memory c) {
+    function _deployComponents() internal returns (PikaLaunchFactory.Components memory c) {
         IVault v = IVault(VAULT);
         ICLPoolManager m = ICLPoolManager(CL_POOL_MANAGER);
         PikaHook hook = new PikaHook(v, m);
         c.router = address(new PikaRouter(WBNB, v, m));
-        c.locker = address(new PikaLocker(v, m, treasury));
         c.orderDeployer = address(new PikaOrderDeployer(hook));
         c.hook = address(hook);
-        c.lpManager = address(new PikaLpManager(v, m, hook));
+        c.positionManager = CL_POSITION_MANAGER;
     }
 
     function _bind(Deployment memory d) internal {
         PikaRouter(payable(d.components.router)).bindFactory(address(d.hub));
-        PikaLocker(d.components.locker).bindFactory(address(d.hub));
         PikaOrderDeployer(d.components.orderDeployer).bindFactory(address(d.hub));
         PikaHook(d.components.hook).bindFactory(address(d.hub));
         d.apps.registry.setFactory(address(d.hub), true);
@@ -287,13 +286,14 @@ contract DeployPikaTestnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
 
     function _check(Deployment memory d, address core, address treasury, address guardian) internal view {
         PikaLaunchFactory.Components memory c = d.components;
-        require(d.hub.treasury() == treasury && PikaLocker(c.locker).treasury() == treasury, "treasury");
+        require(d.hub.treasury() == treasury, "treasury");
         require(d.hub.PROTOCOL_VERSION() == 12 && d.quote.decimals() == 18, "protocol or quote decimals");
         require(
-            PikaLocker(c.locker).factory() == address(d.hub)
+            PikaRouter(payable(c.router)).factory() == address(d.hub)
                 && PikaOrderDeployer(c.orderDeployer).factory() == address(d.hub)
                 && PikaHook(c.hook).factory() == address(d.hub) && d.apps.registry.factories(address(d.hub))
-                && d.apps.registry.templateCount() == 3 && PikaLocker(c.locker).liquidityApps(d.apps.liquidity),
+                && d.apps.registry.templateCount() == 3 && c.positionManager == CL_POSITION_MANAGER
+                && address(PikaLiquidityApp(d.apps.liquidity).positionManager()) == CL_POSITION_MANAGER,
             "components not bound"
         );
         require(
@@ -324,10 +324,9 @@ contract DeployPikaTestnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         console2.log("Trade (OpenFour module.trade.simple implementation)", d.modules.trade);
         console2.log("Migrate module", d.modules.migrate);
         console2.log("Trading router", d.components.router);
-        console2.log("LP locker", d.components.locker);
         console2.log("Order deployer", d.components.orderDeployer);
         console2.log("Pool hook", d.components.hook);
-        console2.log("LP manager", d.components.lpManager);
+        console2.log("Pancake CL position manager", d.components.positionManager);
         console2.log("Trade lens", address(d.lens));
         console2.log("Guardian seat (PikaGuard)", address(d.guard));
         console2.log("Timelock", address(d.timelock));

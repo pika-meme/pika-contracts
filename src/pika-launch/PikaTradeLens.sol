@@ -37,7 +37,7 @@ interface IPikaLensModule {
 
 contract PikaTradeLens is ILockCallback {
     /// @notice Interface generation required by the current component release.
-    uint32 public constant FEE_PROTOCOL_VERSION = 4;
+    uint32 public constant FEE_PROTOCOL_VERSION = 5;
 
     uint8 public constant PHASE_INTERNAL = 1;
     uint8 public constant PHASE_EXTERNAL = 2;

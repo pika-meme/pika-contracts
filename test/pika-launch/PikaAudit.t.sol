@@ -91,11 +91,8 @@ contract PikaAuditTest is PikaInfinityFixture {
         assertTrue(evil.armed());
         assertEq(_walletTotal(token, address(token), CREATOR), creatorBefore);
         assertEq(token.balanceOf(address(factory)), 0);
-        uint128 locked = locker.positions(address(token));
-        uint256 excess = token.balanceOf(address(locker));
-        assertEq(locked, liquidity);
+        assertEq(_burnedLiquidity(token), liquidity, "the pool's liquidity is the burned graduation position");
         assertEq(_poolLiquidity(token), liquidity);
-        assertEq(token.balanceOf(address(locker)), excess);
 
         _assertFeesReachTheRecipient(token, quote, quoteAsset, evil, liquidity, creatorBefore);
 

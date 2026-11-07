@@ -39,7 +39,7 @@ contract PikaToken is OpenFourToken {
     using SafeERC20 for IERC20;
 
     /// @notice Interface generation required by the current component release.
-    uint32 public constant FEE_PROTOCOL_VERSION = 4;
+    uint32 public constant FEE_PROTOCOL_VERSION = 5;
 
     /// @notice Platform share of every outer trade, both directions, always paid in the quote asset.
     uint256 public constant PLATFORM_FEE_BPS = PikaFeeMath.PLATFORM_FEE_BPS;
@@ -91,8 +91,6 @@ contract PikaToken is OpenFourToken {
     address private _router;
     /// @notice When the pool opened; app periods count from here.
     uint64 public tradingStartedAt;
-    address private _locker;
-    address private _lpManager;
     address private _creatorFeeRecipient;
     address private _holderBook;
     /// @notice The launch's order manager, created with the pool at graduation.
@@ -178,23 +176,20 @@ contract PikaToken is OpenFourToken {
                 IPikaHub.Registration({ creator: c.creator, quoteAsset: c.quoteAsset, supply: c.maxSupply, params: p })
             );
         if (
-            s.treasury != treasury || s.locker.code.length == 0 || s.router.code.length == 0
-                || s.lpManager.code.length == 0 || s.hook.code.length == 0
-                || address(IPikaHook(s.hook).vault()) != address(canonicalVault)
+            s.treasury != treasury || s.router.code.length == 0 || s.positionManager.code.length == 0
+                || s.hook.code.length == 0 || address(IPikaHook(s.hook).vault()) != address(canonicalVault)
         ) revert InvalidConfiguration();
         _hook = s.hook;
         _buyFeeBps = p.buyFeeBps;
         _sellFeeBps = p.sellFeeBps;
         _router = s.router;
-        _locker = s.locker;
-        _lpManager = s.lpManager;
         _creatorFeeRecipient = p.creatorFeeRecipient;
         _holderBook = s.holderBook;
         _bindSlots(s.slots, s.holderBook);
         own[s.router] = true;
-        own[s.locker] = true;
-        own[s.lpManager] = true;
         own[s.hook] = true;
+        // Pancake's position manager holds meme only inside a transaction (positions sit in the vault).
+        own[s.positionManager] = true;
         // OpenFour's components hold or move supply on the curve: never dividend holders.
         own[c.vault] = true;
         own[c.curveModule] = true;
@@ -243,16 +238,8 @@ contract PikaToken is OpenFourToken {
         return IPikaHook(_hook);
     }
 
-    function locker() external view returns (address) {
-        return _locker;
-    }
-
     function tradingRouter() external view returns (address) {
         return _router;
-    }
-
-    function lpManager() external view returns (address) {
-        return _lpManager;
     }
 
     function creatorFeeRecipient() external view returns (address) {
@@ -418,8 +405,8 @@ contract PikaToken is OpenFourToken {
         emit CreatorFeesClaimed(to, memeAmount, quoteAmount);
     }
 
-    /// @notice An order's or a position's sell fee (platform plus project), paid by the calling component in quote
-    ///         by allowance to this token, on the `quoteBought` the position returned; at most `maxFee`.
+    /// @notice A filled sell order's fee (platform plus project), paid by the order manager in quote by allowance to
+    ///         this token, on the `quoteBought` the order returned; at most `maxFee`.
     function chargeSellFee(address account, uint256 quoteBought, uint256 maxFee) external returns (uint256 fee) {
         _requireSettler();
         fee = PikaFeeMath.feeAt(quoteBought, outputFeeBps(false));
@@ -429,7 +416,7 @@ contract PikaToken is OpenFourToken {
         _book(account, false, quoteBought, platform, fee - platform);
     }
 
-    /// @notice An order's or a position's buy fees, paid by the calling component from what it holds.
+    /// @notice A filled buy order's fees, paid by the order manager from what it holds.
     function chargeBuyFees(
         address account,
         uint256 quoteSpent,
@@ -448,7 +435,7 @@ contract PikaToken is OpenFourToken {
     }
 
     function _requireSettler() private view {
-        if ((msg.sender != orderManager && msg.sender != _lpManager) || !tradingStarted) {
+        if (msg.sender != orderManager || !tradingStarted) {
             revert UnauthorizedComponent();
         }
     }

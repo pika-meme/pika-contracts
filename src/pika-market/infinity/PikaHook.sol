@@ -7,7 +7,6 @@ import { ICLHooks } from "infinity-core/src/pool-cl/interfaces/ICLHooks.sol";
 import {
     HOOKS_BEFORE_INITIALIZE_OFFSET,
     HOOKS_BEFORE_ADD_LIQUIDITY_OFFSET,
-    HOOKS_BEFORE_REMOVE_LIQUIDITY_OFFSET,
     HOOKS_BEFORE_SWAP_OFFSET,
     HOOKS_AFTER_SWAP_OFFSET,
     HOOKS_BEFORE_DONATE_OFFSET,
@@ -28,14 +27,17 @@ import {
     toBeforeSwapDelta
 } from "infinity-core/src/types/BeforeSwapDelta.sol";
 import { CLPoolParametersHelper } from "infinity-core/src/pool-cl/libraries/CLPoolParametersHelper.sol";
+import { TickMath } from "infinity-core/src/pool-cl/libraries/TickMath.sol";
 import { PikaFactoryBound } from "../PikaFactoryBound.sol";
 import { PikaFeeMath } from "../../common/libraries/PikaFeeMath.sol";
 import { IPikaLaunchToken, IPikaHook } from "../interfaces/IPikaMarket.sol";
 
 /// @notice The hook of every Pika pool on Pancake Infinity, shared by all launches of one factory.
-/// @dev It is the only place that decides who may initialize, add or remove liquidity on a launch pool, and it takes
-///      both trade fees inside the swap. Pika has no price limits and no venue lock: the token trades on any pool,
-///      any locker may swap on the launch pool, and meme crosses the vault boundary as a plain ERC20. Every fee is
+/// @dev It decides who may initialize a launch pool and which ranges liquidity may take, and it takes both trade fees
+///      inside the swap. Liquidity is open to everyone once the pool trades (Pancake's position manager or any vault
+///      locker), adding and removing alike; the pool charges no LP fee. Pika has no price limits and no venue lock:
+///      the token trades on any pool, any locker may swap on the launch pool, and meme crosses the vault boundary as
+///      a plain ERC20. Every fee is
 ///      taken from the swap's own deltas, never on the ERC20 boundary, so a locker that keeps its meme inside the
 ///      vault (a router hopping into another pool) still pays it. The platform fee is always quote: a buy pays it
 ///      out of its quote input (reserved on the specified side before an exact-input swap, charged on the
@@ -49,10 +51,14 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
     using CLPoolParametersHelper for bytes32;
 
     /// @notice Interface generation required by the current component release.
-    uint32 public constant FEE_PROTOCOL_VERSION = 4;
+    uint32 public constant FEE_PROTOCOL_VERSION = 5;
 
     uint24 public constant POOL_FEE = 0;
-    int24 public constant TICK_SPACING = 1;
+    /// @dev Position bounds step by 50 ticks (about 0.5% in price); prices themselves move freely.
+    int24 public constant TICK_SPACING = 50;
+    /// @notice The full range at this spacing: the outermost ticks a position can use (+-887250).
+    int24 public constant MIN_USABLE_TICK = (TickMath.MIN_TICK / TICK_SPACING) * TICK_SPACING;
+    int24 public constant MAX_USABLE_TICK = (TickMath.MAX_TICK / TICK_SPACING) * TICK_SPACING;
 
     IVault public immutable override vault;
     ICLPoolManager public immutable override poolManager;
@@ -80,6 +86,7 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
     error UnknownPool();
     error TradingNotStarted();
     error UnauthorizedSender(address sender);
+    error InvalidRange();
     error UnsupportedSwap();
     error DonationsDisabled();
     error AmountOverflow();
@@ -108,13 +115,12 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
     function _bitmap() private pure returns (uint16) {
         return uint16(
             (1 << HOOKS_BEFORE_INITIALIZE_OFFSET) | (1 << HOOKS_BEFORE_ADD_LIQUIDITY_OFFSET)
-                | (1 << HOOKS_BEFORE_REMOVE_LIQUIDITY_OFFSET) | (1 << HOOKS_BEFORE_SWAP_OFFSET)
-                | (1 << HOOKS_AFTER_SWAP_OFFSET) | (1 << HOOKS_BEFORE_DONATE_OFFSET)
+                | (1 << HOOKS_BEFORE_SWAP_OFFSET) | (1 << HOOKS_AFTER_SWAP_OFFSET) | (1 << HOOKS_BEFORE_DONATE_OFFSET)
                 | (1 << HOOKS_BEFORE_SWAP_RETURNS_DELTA_OFFSET) | (1 << HOOKS_AFTER_SWAP_RETURNS_DELTA_OFFSET)
         );
     }
 
-    /// @notice The pool parameters every Pika pool uses: this hook's callbacks and a tick spacing of 1.
+    /// @notice The pool parameters every Pika pool uses: this hook's callbacks and a tick spacing of 50.
     function poolParameters() public pure returns (bytes32) {
         return bytes32(uint256(_bitmap())).setTickSpacing(TICK_SPACING);
     }
@@ -179,20 +185,24 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
         revert InvalidConfiguration();
     }
 
-    /// @dev Before trading only the locker seeds the graduation position (the factory's graduation is the only
-    ///      call that makes it do so); afterwards the order manager (order positions), the LP manager (third-party
-    ///      market making) and the locker (the liquidity sink adding to the locked graduation position) add
-    ///      liquidity. Nobody else can own liquidity in a launch pool.
+    /// @dev Anyone may add liquidity once the pool trades. A position that touches either end of the usable tick range
+    ///      (`MIN_USABLE_TICK`, `MAX_USABLE_TICK`) must span all of it: a few wei in a narrow range at either end would
+    ///      otherwise fill that tick's liquidity cap and stop every later full-range position (the burned graduation
+    ///      position's top-ups among them), while filling the cap with full-range liquidity would take millions of
+    ///      times the pool's reserves. Before trading the only liquidity is the hub's full-range graduation position,
+    ///      minted inside graduation. Removing is not hooked: a position's owner may always take it out, and nobody
+    ///      owns the burned ones.
     function beforeAddLiquidity(
-        address sender,
+        address,
         PoolKey calldata key,
-        ICLPoolManager.ModifyLiquidityParams calldata,
+        ICLPoolManager.ModifyLiquidityParams calldata params,
         bytes calldata
     ) external view override onlyPoolManager returns (bytes4) {
-        IPikaLaunchToken t = _token(key);
-        if (sender != t.locker() && (!t.tradingStarted() || (sender != t.orderManager() && sender != t.lpManager()))) {
-            revert UnauthorizedSender(sender);
-        }
+        // A bound off the spacing (any tick past a usable end is) reverts in the pool manager after this callback.
+        bool low = params.tickLower == MIN_USABLE_TICK;
+        bool high = params.tickUpper == MAX_USABLE_TICK;
+        if (low != high) revert InvalidRange();
+        if (!low && !_token(key).tradingStarted()) revert TradingNotStarted();
         return this.beforeAddLiquidity.selector;
     }
 
@@ -207,19 +217,13 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
         revert InvalidConfiguration();
     }
 
-    /// @dev Only order positions and third-party positions come out. The locker is never let through: the graduation
-    ///      position stays locked whatever a locker implementation does.
     function beforeRemoveLiquidity(
-        address sender,
-        PoolKey calldata key,
+        address,
+        PoolKey calldata,
         ICLPoolManager.ModifyLiquidityParams calldata,
         bytes calldata
-    ) external view override onlyPoolManager returns (bytes4) {
-        IPikaLaunchToken t = _token(key);
-        if (sender != t.orderManager() && sender != t.lpManager()) {
-            revert UnauthorizedSender(sender);
-        }
-        return this.beforeRemoveLiquidity.selector;
+    ) external pure override returns (bytes4) {
+        revert InvalidConfiguration();
     }
 
     function afterRemoveLiquidity(

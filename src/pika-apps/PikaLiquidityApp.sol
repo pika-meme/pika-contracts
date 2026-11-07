@@ -5,27 +5,37 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { PikaSinkBase } from "./PikaSinkBase.sol";
-import { IPikaLiquidityLocker } from "./interfaces/IPikaApps.sol";
-import { IPikaLaunchToken } from "../pika-market/interfaces/IPikaMarket.sol";
+import { PikaBurnedLiquidity } from "../common/libraries/PikaBurnedLiquidity.sol";
+import { IPikaLaunchToken, IPikaPositionManager } from "../pika-market/interfaces/IPikaMarket.sol";
 
-/// @notice "增加流动性": the liquidity sink. Project fees accumulate here and a keeper adds them to the launch's
-///         permanently locked graduation position, so they can never leave the pool.
-/// @dev A buy fee is meme and a sell fee is quote, while the full-range position wants both at the current price.
+/// @notice "增加流动性": the liquidity sink. Project fees accumulate here and a keeper adds them to the launch pool
+///         as full-range liquidity minted to the burn address, so they can never leave the pool.
+/// @dev A buy fee is meme and a sell fee is quote, while a full-range position wants both at the current price.
 ///      Before adding, the dispatch sells meme or buys it on the launch's own pool so that the two sides are worth
-///      about the same, then hands both to the launch's locker, which adds as much as they fund and leaves the rest
-///      here. The swap pays the outer fee like any trade (the router fills it in full or reverts); what the locker
-///      could not add waits for the next dispatch.
+///      about the same, then mints a full-range Pancake LP NFT to the burn address with as much as they fund (an
+///      NFT owned by the burn address cannot be topped up, so every dispatch mints its own). The swap pays the
+///      outer fee like any trade (the router fills it in full or reverts); what the position could not take waits
+///      for the next dispatch.
 contract PikaLiquidityApp is PikaSinkBase {
     using SafeERC20 for IERC20;
 
     bytes32 public constant KEY = "liquidity";
-    uint16 public constant VERSION = 2;
+    uint16 public constant VERSION = 3;
     uint256 private constant Q96 = 2 ** 96;
 
-    /// @dev `liquidity` is the position's increase; the amounts are what it took.
-    event LiquidityAdded(address indexed token, uint128 liquidity, uint256 memeAdded, uint256 quoteAdded);
+    /// @notice Pancake's official CL position manager, which mints the burned positions.
+    IPikaPositionManager public immutable positionManager;
 
-    constructor(address registry_) PikaSinkBase(registry_) { }
+    /// @dev `liquidity` is the new burned position's; the amounts are what it took (`positionId` is the LP NFT,
+    ///      owned by the burn address).
+    event LiquidityAdded(
+        address indexed token, uint128 liquidity, uint256 memeAdded, uint256 quoteAdded, uint256 positionId
+    );
+
+    constructor(address registry_, address positionManager_) PikaSinkBase(registry_) {
+        if (positionManager_.code.length == 0) revert InvalidParams();
+        positionManager = IPikaPositionManager(positionManager_);
+    }
 
     function templateKey() external pure returns (bytes32) {
         return KEY;
@@ -38,11 +48,11 @@ contract PikaLiquidityApp is PikaSinkBase {
     error PriceOutOfRange(uint160 price, uint160 lower, uint160 upper);
     error Expired();
 
-    /// @notice Add what this sink holds for the launch to its locked position, balancing the two sides on the pool
-    ///         first. Keeper-only: `swapMinOut` guards the balancing swap (ignored when none is needed) and the pool
-    ///         price must sit inside [`sqrtPriceMinX96`, `sqrtPriceMaxX96`] both before the swap and when the locker
-    ///         adds, so a sandwiched dispatch cannot add liquidity at a pushed price. The deadline applies even
-    ///         when the two sides are already balanced and no swap is needed.
+    /// @notice Add what this sink holds for the launch to the pool as burned full-range liquidity, balancing the two
+    ///         sides on the pool first. Keeper-only: `swapMinOut` guards the balancing swap (ignored when none is
+    ///         needed) and the pool price must sit inside [`sqrtPriceMinX96`, `sqrtPriceMaxX96`] both before the swap
+    ///         and when the position is minted, so a sandwiched dispatch cannot add liquidity at a pushed price. The
+    ///         deadline applies even when the two sides are already balanced and no swap is needed.
     function addLiquidity(
         address token,
         uint256 swapMinOut,
@@ -58,19 +68,34 @@ contract PikaLiquidityApp is PikaSinkBase {
         if (!t.tradingStarted()) revert NotGraduated();
         address quote = t.quoteAsset();
         _balance(t, quote, swapMinOut, sqrtPriceMinX96, sqrtPriceMaxX96, deadline);
-        // Add whatever is pending now (the swap's own fee reaches this sink only with a later push).
+        (uint160 price, bool memeIs0) = _price(t);
+        if (price < sqrtPriceMinX96 || price > sqrtPriceMaxX96) {
+            revert PriceOutOfRange(price, sqrtPriceMinX96, sqrtPriceMaxX96);
+        }
+        return _mintBurned(t, quote, memeIs0);
+    }
+
+    /// @dev Mints whatever is pending now (the balancing swap's own fee reaches this sink only with a later push) as
+    ///      a burned full-range position and books what actually left this contract (the pool rounds up). The
+    ///      position manager sweeps back whatever it held, a stranger's leftovers included: those only raise this
+    ///      contract's balance, so the books stay covered.
+    function _mintBurned(IPikaLaunchToken t, address quote, bool memeIs0)
+        private
+        returns (uint128 liquidity, uint256 memeAdded, uint256 quoteAdded)
+    {
+        address token = address(t);
         uint256 meme = pending[token][token];
         uint256 q = pending[token][quote];
-        address locker = t.locker();
-        IERC20(token).forceApprove(locker, meme);
-        IERC20(quote).forceApprove(locker, q);
-        (liquidity, memeAdded, quoteAdded) =
-            IPikaLiquidityLocker(locker).addToPosition(token, meme, q, sqrtPriceMinX96, sqrtPriceMaxX96);
-        IERC20(token).forceApprove(locker, 0);
-        IERC20(quote).forceApprove(locker, 0);
+        uint256 memeBefore = IERC20(token).balanceOf(address(this));
+        uint256 quoteBefore = IERC20(quote).balanceOf(address(this));
+        uint256 positionId;
+        (positionId, liquidity,,) =
+            PikaBurnedLiquidity.mint(positionManager, positionManager.clPoolManager(), t.poolKey(), memeIs0, meme, q);
+        memeAdded = _spent(token, memeBefore);
+        quoteAdded = _spent(quote, quoteBefore);
         pending[token][token] = meme - memeAdded;
         pending[token][quote] = q - quoteAdded;
-        emit LiquidityAdded(token, liquidity, memeAdded, quoteAdded);
+        emit LiquidityAdded(token, liquidity, memeAdded, quoteAdded, positionId);
     }
 
     /// @notice `addLiquidity` for several launches, each with its own minimum output and price range, under one
@@ -135,6 +160,12 @@ contract PikaLiquidityApp is PikaSinkBase {
         (address from, address to) = sellMeme ? (token, quote) : (quote, token);
         pending[token][from] -= spent;
         pending[token][to] += out;
+    }
+
+    /// @dev How much of `asset` left this contract since its balance was `before`.
+    function _spent(address asset, uint256 before) private view returns (uint256) {
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        return balance < before ? before - balance : 0;
     }
 
     /// @dev Meme valued in quote at `sqrtPriceX96`.

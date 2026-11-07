@@ -5,7 +5,16 @@
 Pika 是基于 [OpenFour](https://four.meme) 的发射平台。发射由 OpenFour Core 按 Pika 组合创建，在 OpenFour 的
 bonding 曲线上交易（内盘）；售罄后毕业进带 Pika Hook 的 Pancake Infinity 集中流动性池（外盘）。
 
-本仓库是提交 OpenFour 审核的合约和测试。协议版本 12。
+本仓库是提交 OpenFour 审核的合约和测试。协议版本 12；合约版本见 `package.json`，每个版本打 tag（`v12.2.0`）。
+
+## v12.2.0 的改动（相对 v12.0.0）
+
+- **毕业的流动性按标准方式销毁。** 开盘仓位经 Pancake 官方 `CLPositionManager` 铸成全区间 LP NFT，所有者 `0x…dEaD`，相当于 V2 把 LP 代币转给死地址。这个合约没有 owner、不能升级，减仓和销毁只认 NFT 所有者或其授权，所以流动性永远撤不出池子。删除 `PikaLocker`。
+- **流动性开放。** 任何人都能经 Pancake 仓位合约或任何 vault 持锁方在发射池加减仓，不收费。删除 `PikaLpManager`。Hook 只要求碰到可用 tick 两端的仓位必须正好是全区间。
+- **余数。** 铸完后中枢把剩下的 meme（曲线未售零头、取整）转给 `0x…dEaD`，剩下的报价币记给金库，由金库从中枢领取（`claimTreasuryQuote`）。中枢新事件：`GraduationPositionBurned`、`TreasuryQuoteAccrued`、`TreasuryQuoteClaimed`。中枢组件改为 `(router, orderDeployer, hook, positionManager)`。
+- **代币。** 去掉 `locker()`、`lpManager()`；仓位合约算平台账户（不参与分红）。
+- **tick 间距 50。** 发射池的 tick 间距从 1 改为 50：仓位和限价单的边界按约 0.5% 一档，全区间是 ±887250（`TickMath.minUsableTick` / `maxUsableTick`）。价格仍连续变化。
+- **审核合约中改动的：** 中枢和代币。`PikaTokenModule`、`PikaMigrateModule` 没改。
 
 ## 审核范围
 
@@ -32,14 +41,14 @@ bonding 曲线上交易（内盘）；售罄后毕业进带 Pika Hook 的 Pancak
 | 路径 | 内容 |
 | --- | --- |
 | `src/pika-launch/` | 中枢、代币、两个 OpenFour 模块（`openfour/`）、路由、报价合约、限价单部署器 |
-| `src/pika-market/` | 外盘：`PikaHook`、`PikaLocker`、`PikaOrderManager`、`PikaLpManager` |
+| `src/pika-market/` | 外盘：`PikaHook` 和 `PikaOrderManager`（限价单） |
 | `src/pika-apps/` | 应用登记表和三个默认手续费应用（销毁、持有者分红、加流动性） |
-| `src/common/` | Guardian 席位（`PikaGuard`）和手续费计算 |
+| `src/common/` | Guardian 席位（`PikaGuard`）、手续费计算，以及 `PikaBurnedLiquidity`：铸全区间 Pancake LP NFT 给销毁地址（中枢毕业、加流动性应用共用） |
 | `src/openfour/` | OpenFour 公开的接口、`OpenFourTypes`、`OpenFourToken`、`StandardVault`，以及 `OpenFourToken` 用到的 OpenZeppelin 4.9.6 文件，原样拷自 `four-meme-community/openfour-docs`（MIT）。`StandardVault` 拷贝只给本地测试用 |
 | `src/mocks/` | 测试网部署用的模拟 USDT |
 | `test/` | 测试（见下） |
 | `script/` | 测试网、主网部署脚本（分叉测试会运行它们） |
-| `lib/` | git 子模块：forge-std 1.12.0、OpenZeppelin 5.4.0（含 upgradeable）、Pancake `infinity-core` 与 `infinity-periphery` |
+| `lib/` | git 子模块：forge-std 1.12.0、OpenZeppelin 5.4.0（含 upgradeable）、Pancake `infinity-core` 与 `infinity-periphery`，外加测试部署真实 `CLPositionManager` 需要的两个依赖自带子模块：`infinity-periphery/lib/permit2`、`infinity-core/lib/solmate` |
 
 ## 生命周期
 
@@ -54,15 +63,15 @@ bonding 曲线上交易（内盘）；售罄后毕业进带 Pika Hook 的 Pancak
    - 中枢核对 Core 对该代币的记录：代币存在、按允许的组合和 Core 创建、调用者是该发射的 migrate 模块、已售罄。
    - 中枢在 `PikaHook` 登记池子，按曲线终价初始化。
    - 部署该发射的限价单合约。
-   - 用曲线留下的 20% 供应加 98% 募集额，在 `PikaLocker` 建全区间仓位并永久锁定。
    - 把 1% 募集额记给创建者收费钱包，从代币里领取。
-   - 其余报价币记给金库。
+   - 用曲线留下的 20% 供应加 98% 募集额，经 Pancake `CLPositionManager` 铸全区间（±887250）仓位，LP NFT 的所有者是 `0x…dEaD`，谁都撤不走。
+   - 剩下的 meme 转给 `0x…dEaD`，其余报价币记给金库。
    - 开放外盘。
    - 模块返回 `abi.encode(bytes32 poolId)`（迁移数据版本 1）。
-4. **外盘。** 发射池是带 `PikaHook` 的 Pancake Infinity CL 池，LP 费为 0。
+4. **外盘。** 发射池是带 `PikaHook` 的 Pancake Infinity CL 池，LP 费为 0，tick 间距 50。
    - Hook 在 swap 内收费：0.3% 平台费，加上每个发射自己的买入费、卖出费，每个方向合计不超过 30%；平台抽项目费的 10%。
    - 任何路由或持锁方都能交易，Hook 没有白名单。
-   - 只有锁仓合约、限价单合约和 `PikaLpManager` 能加减仓；拒绝捐赠。
+   - 任何人都能加减仓，不收费。碰到可用 tick 两端的仓位必须正好是全区间：否则几 wei 的窄区间就能占满端点 tick 的流动性上限，挡住之后的全区间仓位。撤仓不回调 Hook。拒绝捐赠。
    - 交易只在代币里记账，之后由 `pushFees` 付给金库、创建者钱包和应用。
 
 ## 中枢作为校验器
@@ -101,14 +110,15 @@ bonding 曲线上交易（内盘）；售罄后毕业进带 Pika Hook 的 Pancak
 - **外盘为什么保留 0.8.26：** 它用 transient 存储（EIP-1153），包括防重入锁、路由的交易者记录、Hook 每笔 swap 的费率缓存，paris 没有这个功能。
 - **审核的四个合约不用 transient 存储，也没有 PUSH0。**
 - **它们只经接口调用外盘，不 import 外盘源码，** 所以两组可以各用各的设置编译。
-- **中枢唯一的防重入锁是 OpenZeppelin 的存储版 `ReentrancyGuard`，** 用在 `graduate` 上。
+- **中枢唯一的防重入锁是 OpenZeppelin 的存储版 `ReentrancyGuard`，** 用在 `graduate` 和 `claimTreasuryQuote` 上。
+- **中枢一起编译几个库：** `src/common/libraries/PikaBurnedLiquidity.sol` 和 Pancake 的数学库（`TickMath`、`LiquidityAmounts`、`CLPoolParametersHelper`）；它经接口调用仓位合约。
 - **发布字节码来自 Hardhat。** Foundry 用 0.8.26 编译整棵树，只用于类型和测试；部署脚本和默认配置的测试从 Hardhat 产物创建这四个合约（`script/PikaRelease.sol`），所以跑的是发布字节码。
 
 ## 与标准 OpenFour 组合的不同
 
 - **两个自写模块**（token、migrate）和自写的代币实现。vault、curve、trade 用 OpenFour 的。
 - **模块依赖中枢。** 代币初始化时向中枢登记；中枢是校验器；migrate 模块把全部资金交给中枢。所以中枢的状态影响创建和毕业。
-- **迁移去向是带 Hook 的 Pancake Infinity 池，** 不是普通的 V2/V4 池。
+- **迁移去向是带 Hook 的 Pancake Infinity 池，** 不是普通的 V2/V4 池。开盘流动性按标准方式销毁：Pancake 官方仓位合约的 LP NFT，所有者 `0x…dEaD`。
 - **代币继承 `OpenFourToken` 并有扩展：**
   - 每次转账把双方余额报给该发射的分红簿（如果有）；分红簿回滚则转账回滚。
   - 记外盘手续费。
@@ -119,7 +129,9 @@ bonding 曲线上交易（内盘）；售罄后毕业进带 Pika Hook 的 Pancak
 
 ```bash
 git clone https://github.com/pika-meme/pika-contracts.git && cd pika-contracts
-git submodule update --init          # 不要 --recursive：依赖自己的子模块用不到
+git submodule update --init          # 不要 --recursive：依赖自己的子模块只需要下面两个
+git -C lib/pancake-infinity-periphery submodule update --init lib/permit2
+git -C lib/pancake-infinity-core submodule update --init lib/solmate
 npm ci                               # Node 20 或 22
 npx hardhat compile                  # 发布产物
 FOUNDRY_PROFILE=lite forge test      # 本地快速用例（所有合约都用 Foundry 自己编的）
@@ -148,19 +160,21 @@ RUN_PIKA_OPENFOUR_FORK=true OPENFOUR_REGISTRY=<fork 的 Registry> PRIVATE_KEY=<�
 | `test/pika-launch/PikaProjectFees.t.sol`、`PikaFeeCut.t.sol`、`PikaAutoPush.t.sol`、`PikaPendingFees.t.sol`、`PikaFeePushReview.t.sol`（23） | 代币的手续费记账与推送：项目费、平台抽成、应用槽、创建者钱包 |
 | `test/pika-launch/PikaGuardian.t.sol`、`PikaTimelock.t.sol`（13） | Guardian 与 timelock 对中枢的控制 |
 | `test/pika-launch/PikaAudit.t.sol`、`PikaAuditV10.t.sol`（6） | 回归：合约创建者无法阻止毕业（两种报价币、两种代币排序）；每条收费路径上手续费账本与代币余额一致；新持有人只按持有时长分红 |
+| `test/pika-market/PikaOpenLiquidity.t.sol`（6） | 毕业铸一个全区间（±887250）LP NFT 给销毁地址；别人留在仓位合约里的币挡不住毕业；任何人免费加减仓；只有 NFT 所有者能撤；金库从中枢领毕业余款；加流动性应用的账始终有币覆盖 |
 
 `test/helpers/` 里是本地替身：
 - `MockOpenFourCore`：Core、Registry、Tools、FeeRouter。
 - `OpenFourBondingCurve`、`OpenFourSimpleTrade`：官方的曲线和交易模块。
-- `InfinityArtifacts`：编出测试要部署的真实 Pancake Infinity `Vault` 和 `CLPoolManager`。
+- `InfinityArtifacts`：编出测试要部署的真实 Pancake Infinity `Vault`、`CLPoolManager` 和 `CLPositionManager`。
+- `PikaLpHelpers`：像钱包一样经仓位合约提供第三方流动性。
 
 OpenFour 真实 Core 上的 gas（BSC 测试网分叉，`test_GasOnRealCore --isolate`）：
 
 | 步骤 | gas |
 | --- | --- |
-| 创建（带分红应用） | 331 万 |
-| 创建（无应用） | 308 万 |
+| 创建（带分红应用） | 324 万 |
+| 创建（无应用） | 301 万 |
 | 按数量买（新持有人） | 52.2 万 |
 | 按数量买（老持有人） | 48.1 万 |
 | 卖 | 45.2 万 |
-| 买空并毕业 | 156 万 |
+| 买空并毕业 | 176 万（多出的是铸 LP NFT；v12.0.0 为 156 万） |

@@ -44,9 +44,13 @@ abstract contract PikaArtifacts is Test {
         return _deploy(name, abi.encode(vault_, manager_));
     }
 
-    /// @dev The LP manager is fixed to the hook that registers the launch pools it may hold positions in.
-    function _newLpManager(address vault_, address manager_, address hook_) internal returns (address) {
-        return _deploy("PikaLpManager", abi.encode(vault_, manager_, hook_));
+    /// @dev Pancake's CL position manager (the LP NFT). No Permit2 and no descriptor: the tests pay it from its own
+    ///      balance (`SETTLE` with the position manager as payer) and never render a token URI.
+    function _newPositionManager(address vault_, address manager_, address weth_) internal returns (address) {
+        return vm.deployCode(
+            "CLPositionManager.sol:CLPositionManager",
+            abi.encode(vault_, manager_, address(0), uint256(300_000), address(0), weth_)
+        );
     }
 
     function _newToken(address hub_, address vault_, address manager_) internal returns (address) {
@@ -55,10 +59,6 @@ abstract contract PikaArtifacts is Test {
 
     function _newRouter(address wbnb, address vault_, address manager_) internal returns (address) {
         return _deploy("PikaRouter", abi.encode(wbnb, vault_, manager_));
-    }
-
-    function _newLocker(address vault_, address manager_, address treasury_) internal returns (address) {
-        return _deploy("PikaLocker", abi.encode(vault_, manager_, treasury_));
     }
 
     /// @dev Contracts whose constructor takes one address: PikaGuard (owner), app template implementations

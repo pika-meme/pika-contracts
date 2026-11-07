@@ -10,7 +10,6 @@ import { PikaLaunchFactory } from "../../src/pika-launch/PikaLaunchFactory.sol";
 import { PikaToken } from "../../src/pika-launch/PikaToken.sol";
 import { PikaRouter } from "../../src/pika-launch/PikaRouter.sol";
 import { PikaOrderManager } from "../../src/pika-market/infinity/PikaOrderManager.sol";
-import { PikaLpManager } from "../../src/pika-market/infinity/PikaLpManager.sol";
 import { AppBinding } from "../../src/pika-apps/interfaces/IPikaApps.sol";
 
 /// @notice 2026-10-29 (second) audit of the v10 gas batch: fee books against balances on every fee path, clone
@@ -67,6 +66,7 @@ contract PikaAuditV10Test is PikaInfinityFixture {
         // A filled sell order claimed: the order manager pays the quote fee into the token by allowance.
         PikaOrderManager orders = _orders(token);
         (, int24 tick,,) = manager.getSlot0(token.poolId());
+        tick = _onSpacing(tick);
         vm.startPrank(ALICE);
         token.approve(address(orders), 2_000_000 ether);
         uint256 id = orders.placeOrder(true, tick + 100, tick + 200, 2_000_000 ether);
@@ -78,22 +78,22 @@ contract PikaAuditV10Test is PikaInfinityFixture {
         assertGt(_unpaid(token, address(usdt)), quoteUnpaidBefore);
         _assertBooksMatchBalances(token);
 
-        // An LP position withdrawn as a net sell: the LP manager pays the quote fee the same way.
+        // A third-party LP position (a Pancake LP NFT, anyone's since 2026-11-07) withdrawn as a net sell books
+        // nothing: liquidity is fee-free, only swaps pay.
         (, tick,,) = manager.getSlot0(token.poolId());
-        vm.startPrank(ALICE);
-        token.approve(address(lpManager), type(uint256).max);
-        (uint256 positionId, uint128 liquidity) = lpManager.mint(
-            PikaLpManager.AddParams(address(token), tick + 100, tick + 200, 10_000 ether, 0, 0, block.timestamp)
-        );
-        vm.stopPrank();
+        tick = _onSpacing(tick);
+        (uint256 positionId, uint128 liquidity) = _lpMintMeme(token, ALICE, tick + 100, tick + 200, 10_000 ether, 0);
         _swap(token, CAROL, false, 300 ether); // pushes
         quoteUnpaidBefore = _unpaid(token, address(usdt));
-        vm.prank(ALICE);
-        lpManager.decrease(PikaLpManager.RemoveParams(positionId, liquidity, 0, 0, ALICE, block.timestamp));
-        assertGt(_unpaid(token, address(usdt)), quoteUnpaidBefore);
+        uint256 memeUnpaidBefore = _unpaid(token, address(token));
+        _lpDecrease(positionManager, positionId, ALICE, liquidity, ALICE);
+        assertEq(_unpaid(token, address(usdt)), quoteUnpaidBefore);
+        assertEq(_unpaid(token, address(token)), memeUnpaidBefore);
         _assertBooksMatchBalances(token);
 
-        // One push pays everything; a second one moves nothing; the creator's claim empties the token.
+        // One push pays everything (a trade first, so there is something to pay); a second one moves nothing; the
+        // creator's claim empties the token.
+        _directSwap(token, CAROL, false, 100 ether);
         uint256 treasuryMeme = token.balanceOf(TREASURY);
         uint256 treasuryQuote = usdt.balanceOf(TREASURY);
         token.pushFees();

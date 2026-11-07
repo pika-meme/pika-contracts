@@ -6,7 +6,7 @@ import { IVault } from "infinity-core/src/interfaces/IVault.sol";
 import { PoolKey } from "infinity-core/src/types/PoolKey.sol";
 import { PoolId } from "infinity-core/src/types/PoolId.sol";
 
-/// @notice What the hook, order manager, LP manager and the sink templates read from a launch token.
+/// @notice What the hook, the order manager and the sink templates read from a launch token.
 interface IPikaLaunchToken {
     /// @notice What the hook's swap callbacks need, in one read: whether the pool trades and the three fee rates.
     struct SwapTerms {
@@ -24,8 +24,6 @@ interface IPikaLaunchToken {
     function tradingStarted() external view returns (bool);
     function tradingRouter() external view returns (address);
     function orderManager() external view returns (address);
-    function lpManager() external view returns (address);
-    function locker() external view returns (address);
     /// @notice The pool's other asset: the quote token, or WBNB for a BNB launch.
     function quoteAsset() external view returns (address);
     function poolKey() external view returns (PoolKey memory);
@@ -34,10 +32,10 @@ interface IPikaLaunchToken {
     ///         input or a sell's quote output) and `projectFee` out of the gross output `value` (meme for a buy,
     ///         quote for a sell); `sender` is the locker.
     function notifyPoolFee(address sender, bool buy, uint256 platformFee, uint256 projectFee, uint256 value) external;
-    /// @notice The order and LP managers pay a sell's fee (platform plus project) from the quote they hold, by
+    /// @notice The order manager pays a filled sell order's fee (platform plus project) from the quote it holds, by
     ///         allowance, on `quoteBought`; at most `maxFee`.
     function chargeSellFee(address account, uint256 quoteBought, uint256 maxFee) external returns (uint256 fee);
-    /// @notice The order and LP managers pay a buy's fees from what they hold: the platform fee in quote (by
+    /// @notice The order manager pays a filled buy order's fees from what it holds: the platform fee in quote (by
     ///         allowance) on top of the `quoteSpent` the pool took, at most `maxPlatformFee` (the reserve), and the
     ///         project fee in meme out of the `memeBought`, at most `maxProjectFee`.
     function chargeBuyFees(
@@ -75,21 +73,14 @@ interface IPikaFactoryBound {
     function factory() external view returns (address);
 }
 
-/// @notice The graduation locker, as the hub checks and calls it.
-interface IPikaLocker {
+/// @notice Pancake Infinity's CL position manager (the official LP NFT), as the hub and the liquidity sink use it to
+///         mint full-range positions owned by the burn address.
+interface IPikaPositionManager {
+    function clPoolManager() external view returns (ICLPoolManager);
     function vault() external view returns (IVault);
-    function poolManager() external view returns (ICLPoolManager);
-    function treasury() external view returns (address);
-    function lockPosition(address token, uint256 memeAmount, uint256 quoteAmount)
-        external
-        returns (uint128 liquidity, uint256 memeUsed, uint256 quoteUsed);
-}
-
-/// @notice The LP manager, as the hub checks it when it publishes components.
-interface IPikaLpManager {
-    function vault() external view returns (IVault);
-    function poolManager() external view returns (ICLPoolManager);
-    function hook() external view returns (IPikaHook);
+    function nextTokenId() external view returns (uint256);
+    function ownerOf(uint256 tokenId) external view returns (address);
+    function modifyLiquidities(bytes calldata payload, uint256 deadline) external payable;
 }
 
 /// @notice The order-manager deployer, as the hub checks and calls it.

@@ -270,8 +270,9 @@ contract PikaProjectFeesTest is PikaInfinityFixture {
     function testTradesSplitTheProjectFeeAndNotifyApps() public {
         PikaToken token = _launch(150, 450, _apps2());
         _fill(token, address(usdt));
-        // Graduation itself pays no fee to anybody.
-        assertEq(token.balanceOf(BURN) + token.balanceOf(address(appA)) + token.balanceOf(CREATOR), 0);
+        // Graduation itself pays no fee to anybody; it burns only the curve's unsold remainder and rounding.
+        assertEq(token.balanceOf(address(appA)) + token.balanceOf(CREATOR), 0);
+        assertLe(token.balanceOf(BURN), 1 ether);
 
         Balances memory before = _balances(token, address(token));
         uint256 vaultBefore = _vaultBalance(token);
@@ -340,6 +341,7 @@ contract PikaProjectFeesTest is PikaInfinityFixture {
         _fill(token, address(usdt));
         PikaOrderManager orders = _orders(token);
         (, int24 tick,,) = manager.getSlot0(token.poolId());
+        tick = _onSpacing(tick);
         uint256 input = 2_000_000 ether;
         vm.startPrank(ALICE);
         token.approve(address(orders), input);

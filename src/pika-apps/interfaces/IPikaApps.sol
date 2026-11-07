@@ -108,15 +108,3 @@ interface IPikaSwapRouter {
 
     function swap(SwapParams calldata p) external payable returns (uint256 spent, uint256 output);
 }
-
-/// @notice What the liquidity template calls on a launch's locker: add to the permanently locked graduation
-///         position from the caller's balances (by allowance), returning what was taken.
-interface IPikaLiquidityLocker {
-    function addToPosition(
-        address token,
-        uint256 memeMax,
-        uint256 quoteMax,
-        uint160 sqrtPriceMinX96,
-        uint160 sqrtPriceMaxX96
-    ) external returns (uint128 liquidity, uint256 memeUsed, uint256 quoteUsed);
-}

@@ -15,7 +15,7 @@ import { IPikaHook, IPikaLaunchToken } from "../pika-market/interfaces/IPikaMark
 ///      clone is initialized in the same call that creates it.
 contract PikaOrderDeployer is PikaFactoryBound {
     /// @notice Interface generation required by the current component release.
-    uint32 public constant FEE_PROTOCOL_VERSION = 4;
+    uint32 public constant FEE_PROTOCOL_VERSION = 5;
 
     address public immutable implementation;
     /// @notice The hook the implementation's clones trade beside.

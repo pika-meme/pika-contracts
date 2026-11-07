@@ -53,6 +53,12 @@ via_ir = true
 paths = "lib/pancake-infinity-core/src/pool-cl/{CLPoolManager.sol,libraries/CLHooks.sol}"
 via_ir = true
 
+[[profile.lite.compilation_restrictions]]
+# Pancake's position manager (the LP NFT the burned positions are minted through) is only built for the tests'
+# artifacts (`test/helpers/InfinityArtifacts.sol`).
+paths = "lib/pancake-infinity-periphery/src/pool-cl/CLPositionManager.sol"
+via_ir = true
+
 [profile.ci.fuzz]
 runs = 2000
 

@@ -17,6 +17,7 @@ import { Currency } from "infinity-core/src/types/Currency.sol";
 import { BalanceDelta } from "infinity-core/src/types/BalanceDelta.sol";
 import { LiquidityAmounts } from "infinity-periphery/src/pool-cl/libraries/LiquidityAmounts.sol";
 import { TickMath } from "infinity-core/src/pool-cl/libraries/TickMath.sol";
+import { CLPoolParametersHelper } from "infinity-core/src/pool-cl/libraries/CLPoolParametersHelper.sol";
 import { V3PriceMath } from "../../common/V3PriceMath.sol";
 import { PikaVaultSettle } from "./PikaVaultSettle.sol";
 import { IPikaLaunchToken, IPikaHook } from "../interfaces/IPikaMarket.sol";
@@ -40,6 +41,7 @@ import { PikaPermit } from "../../pika-launch/interfaces/IPikaLaunch.sol";
 contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
     using SafeERC20 for IERC20;
     using PikaVaultSettle for int128;
+    using CLPoolParametersHelper for bytes32;
 
     uint256 public constant MIN_INPUT = 1_000_000;
     /// @notice The order model the indexer and API rely on (functions, events, `orders`). The 2026-11-06 storage
@@ -109,6 +111,8 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
     /// @notice The launch pools' hook, which this implementation's clones trade beside.
     address public immutable hook;
     bytes32 private immutable poolParameters;
+    /// @dev The launch pools' tick spacing (50): an order's bounds sit on it.
+    int24 private immutable tickSpacing;
     /// @dev The order deployer that built this implementation, the only caller of `initialize`.
     address private immutable deployer;
     address private immutable self;
@@ -141,7 +145,9 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
         vault = hook_.vault();
         poolManager = hook_.poolManager();
         hook = address(hook_);
-        poolParameters = hook_.poolParameters();
+        bytes32 parameters = hook_.poolParameters();
+        poolParameters = parameters;
+        tickSpacing = parameters.getTickSpacing();
         deployer = msg.sender;
         self = address(this);
     }
@@ -282,12 +288,14 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
         private
         returns (uint256 orderId)
     {
-        // Launch pools use a tick spacing of 1, so any tick strictly inside the range is a valid bound. MIN_TICK and
-        // MAX_TICK belong to the locker's full-range position: a few wei there fill the tick's liquidity cap and stop
-        // the locked position from growing (audit 2026-11-02, M-1).
+        // Both bounds sit on the pool's tick spacing, strictly inside the usable range: its two ends belong to
+        // full-range positions only (the hook refuses a narrow range there, audit 2026-11-02 M-1), and a bound off the
+        // spacing could never be added to the pool.
+        int24 spacing = tickSpacing;
         if (
-            amount < MIN_INPUT || amount > type(uint128).max || tickLower >= tickUpper || tickLower <= TickMath.MIN_TICK
-                || tickUpper >= TickMath.MAX_TICK
+            amount < MIN_INPUT || amount > type(uint128).max || tickLower >= tickUpper
+                || tickLower <= TickMath.minUsableTick(spacing) || tickUpper >= TickMath.maxUsableTick(spacing)
+                || tickLower % spacing != 0 || tickUpper % spacing != 0
         ) revert InvalidOrder();
         orderId = ++orderCount;
         StoredOrder storage created = stored[orderId];

@@ -73,7 +73,7 @@ contract PikaInfinityFlowTest is PikaInfinityFixture {
         uint256 treasuryBefore = token.balanceOf(TREASURY);
         uint256 creatorBefore = _walletTotal(token, address(token), CREATOR);
         uint256 creatorQuoteBefore = IERC20(quote).balanceOf(CREATOR);
-        uint256 treasuryOwedBefore = locker.pendingTreasuryQuote(quote);
+        uint256 treasuryOwedBefore = factory.pendingTreasuryQuote(quote);
         _fill(token, quote);
         uint128 liquidity = _poolLiquidity(token);
         assertGt(liquidity, 0);
@@ -81,20 +81,21 @@ contract PikaInfinityFlowTest is PikaInfinityFixture {
         assertEq(uint256(l.phase), uint256(PikaLaunchFactory.Phase.External));
         assertTrue(token.tradingStarted());
         assertEq(token.tradingStartedAt(), block.timestamp);
-        assertEq(token.lpManager(), address(lpManager));
         assertGt(_poolPrice(token), 0);
         assertEq(_poolLiquidity(token), liquidity);
         assertEq(token.balanceOf(TREASURY), treasuryBefore);
         assertEq(_walletTotal(token, address(token), CREATOR), creatorBefore);
-        assertEq(locker.positions(address(token)), liquidity);
+        assertEq(_burnedLiquidity(token), liquidity, "the pool's liquidity is the burned graduation position");
         // The pool opened with 98% of the raise; 1% is credited to the creator's wallet (claimed from the token), 1%
         // is owed to the treasury.
         assertApproxEqAbs(IERC20(quote).balanceOf(address(vault)), 11_760 ether, 1e9);
         assertEq(IERC20(quote).balanceOf(CREATOR), creatorQuoteBefore);
         assertApproxEqAbs(token.creatorFees(quote), 120 ether, 1e9);
-        assertApproxEqAbs(locker.pendingTreasuryQuote(quote) - treasuryOwedBefore, 120 ether, 1e9);
+        assertApproxEqAbs(factory.pendingTreasuryQuote(quote) - treasuryOwedBefore, 120 ether, 1e9);
         assertEq(token.balanceOf(address(factory)), 0);
-        assertEq(IERC20(quote).balanceOf(address(factory)), 0);
+        assertEq(IERC20(quote).balanceOf(address(factory)), factory.pendingTreasuryQuote(quote), "only treasury debt");
+        assertEq(token.balanceOf(address(positionManager)), 0);
+        assertEq(IERC20(quote).balanceOf(address(positionManager)), 0);
     }
 
     /// @dev Balances before a trade: the fee receivers in both assets, the trader's meme and the vault's reserves.
@@ -303,6 +304,7 @@ contract PikaInfinityFlowTest is PikaInfinityFixture {
         _fill(token, address(usdt));
         PikaOrderManager orders = _orders(token);
         (, int24 tick,,) = manager.getSlot0(token.poolId());
+        tick = _onSpacing(tick);
         // Sell order (meme is currency0 => zeroForOne) just above the price.
         int24 lowerTick = tick + 100;
         int24 upperTick = tick + 200;
@@ -372,6 +374,7 @@ contract PikaInfinityFlowTest is PikaInfinityFixture {
         _fill(token, address(usdt));
         PikaOrderManager orders = _orders(token);
         (, int24 tick,,) = manager.getSlot0(token.poolId());
+        tick = _onSpacing(tick);
         uint256 input = 1_000_000 ether;
         vm.startPrank(ALICE);
         token.approve(address(orders), input);

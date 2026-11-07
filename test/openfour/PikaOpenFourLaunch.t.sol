@@ -107,7 +107,7 @@ contract PikaOpenFourLaunchTest is PikaInfinityFixture {
         PikaToken token = _create(address(0), true);
         uint256 balanceBefore = ALICE.balance;
         uint256 creatorBefore = wbnb.balanceOf(CREATOR);
-        uint256 treasuryOwedBefore = locker.pendingTreasuryQuote(address(wbnb));
+        uint256 treasuryOwedBefore = factory.pendingTreasuryQuote(address(wbnb));
         IOpenFourVault v = _vaultOf(token);
         _fill(token, address(0));
         uint256 raised = v.totalRaised();
@@ -139,7 +139,7 @@ contract PikaOpenFourLaunchTest is PikaInfinityFixture {
         vm.prank(CREATOR);
         token.claimCreatorFees(CREATOR);
         assertEq(wbnb.balanceOf(CREATOR) - creatorBefore, raised / 100);
-        assertApproxEqAbs(locker.pendingTreasuryQuote(address(wbnb)) - treasuryOwedBefore, raised / 100, 1e9);
+        assertApproxEqAbs(factory.pendingTreasuryQuote(address(wbnb)) - treasuryOwedBefore, raised / 100, 1e9);
         assertEq(uint8(IOpenFourVault(token.vault()).phase()), uint8(OpenFourTypes.Phase.Migrated));
     }
 
@@ -284,7 +284,7 @@ contract PikaOpenFourLaunchTest is PikaInfinityFixture {
         core.createToken(a);
         // An unlisted quote.
         a = _createArgs(p);
-        a.initParams.quoteAsset = address(lpManager);
+        a.initParams.quoteAsset = address(router);
         vm.prank(CREATOR);
         vm.expectRevert();
         core.createToken(a);
@@ -405,11 +405,13 @@ contract PikaOpenFourLaunchTest is PikaInfinityFixture {
         vm.prank(BOB);
         usdt.transfer(token.vault(), 5 ether);
         _fill(token, address(usdt));
-        assertGe(locker.pendingTreasuryQuote(address(usdt)), 5 ether);
+        assertGe(factory.pendingTreasuryQuote(address(usdt)), 5 ether);
+        assertEq(usdt.balanceOf(address(factory)), factory.pendingTreasuryQuote(address(usdt)));
         uint256 before = usdt.balanceOf(TREASURY);
-        locker.claimTreasuryQuote(address(usdt));
+        factory.claimTreasuryQuote(address(usdt));
         assertGe(usdt.balanceOf(TREASURY) - before, 5 ether);
         assertEq(usdt.balanceOf(address(factory)), 0);
+        assertEq(factory.pendingTreasuryQuote(address(usdt)), 0);
     }
 
     function test_DonatedTokensDoNotMoveTheOpeningPrice() public {
@@ -424,10 +426,12 @@ contract PikaOpenFourLaunchTest is PikaInfinityFixture {
         _fill(a, address(usdt));
         _fill(b, address(usdt));
         assertApproxEqRel(uint256(_poolPrice(a)), uint256(_poolPrice(b)), 1e12);
-        // The donation stays locked with the excess supply.
-        uint256 excessA = a.balanceOf(address(locker));
-        uint256 excessB = b.balanceOf(address(locker));
-        assertGt(excessB, excessA);
+        // The donation is burned with the excess supply.
+        uint256 burnedA = a.balanceOf(BURN);
+        uint256 burnedB = b.balanceOf(BURN);
+        assertGt(burnedB, burnedA);
+        assertEq(a.balanceOf(address(factory)), 0);
+        assertEq(b.balanceOf(address(factory)), 0);
     }
 
     function test_DefaultSupplyChangeAppliesToLaterLaunches() public {

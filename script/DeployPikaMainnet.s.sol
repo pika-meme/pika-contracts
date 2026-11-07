@@ -16,8 +16,8 @@ import { PikaRouter } from "../src/pika-launch/PikaRouter.sol";
 import { PikaTradeLens } from "../src/pika-launch/PikaTradeLens.sol";
 import { PikaOrderDeployer } from "../src/pika-launch/PikaOrderDeployer.sol";
 import { PikaHook } from "../src/pika-market/infinity/PikaHook.sol";
-import { PikaLocker } from "../src/pika-market/infinity/PikaLocker.sol";
-import { PikaLpManager } from "../src/pika-market/infinity/PikaLpManager.sol";
+import { IPikaPositionManager } from "../src/pika-market/interfaces/IPikaMarket.sol";
+import { PikaLiquidityApp } from "../src/pika-apps/PikaLiquidityApp.sol";
 import { PikaAppRegistry } from "../src/pika-apps/PikaAppRegistry.sol";
 import { PikaGuard } from "../src/common/PikaGuard.sol";
 import { PikaTimelockHandover } from "./PikaTimelockHandover.sol";
@@ -56,14 +56,15 @@ interface IOpenFourMainnetCore {
 ///         - App registry with the three UUPS default sinks (burn, dividend, liquidity)
 ///           and the template upgrade TimelockController (UPGRADE_TIMELOCK_DELAY, roles to UPGRADE_PROPOSER_SAFE).
 ///         - The launch hub (PikaLaunchFactory, bound to OpenFour's Core), and one components set on Pancake
-///           Infinity: router, locker, hook and LP manager, the order deployer.
-///         - Fee sinks wired to the locker; KEEPER may run the sinks' trading entries. The app registry allows one
+///           Infinity: router, hook, the order deployer and Pancake's CL position manager, through which graduation
+///           mints each launch's opening position to the burn address (no Pika locker, no Pika LP manager: anyone
+///           adds and removes liquidity through Pancake's position manager).
+///         - KEEPER may run the sinks' trading entries. The app registry allows one
 ///           app per launch besides the default sinks (`maxApps` 1).
 ///         - Quotes: BNB (WBNB on the curve; Core takes and pays native BNB) and USDT.
 ///         - PikaTradeLens, the stateless quote/balance lens the web calls.
 ///         - The owner TimelockController (OWNER_TIMELOCK_DELAY, roles to OWNER_SAFE) takes the factory, the app
-///           registry and the guardian seat (PikaGuard) in the same run (PikaTimelockHandover); the locker's
-///           admin entries follow the factory's owner.
+///           registry and the guardian seat (PikaGuard) in the same run (PikaTimelockHandover).
 ///         - GUARDIAN sits in PikaGuard, which every guarded contract reads (docs/PIKA_CONTRACTS.md §8): it may stop
 ///           new launches, revoke the keeper, disable or pause templates at once, and nothing else; every reversal
 ///           is the owner timelock's.
@@ -82,8 +83,8 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
     ///      which owns the factory and the app registry.
     address internal constant OWNER_SAFE = address(0);
     /// @dev Platform treasury (must be a deployed Safe; may equal OWNER_SAFE): receives every platform fee, the
-    ///      platform's cut of project fees and the quote a graduation leaves over. Fixed in the factory and the
-    ///      locker for good.
+    ///      platform's cut of project fees and the quote a graduation leaves over (claimed from the factory). Fixed in
+    ///      the factory for good.
     address internal constant TREASURY_SAFE = address(0);
     /// @dev Template upgrade Safe (must be a deployed Safe; may equal OWNER_SAFE): proposer, executor and canceller
     ///      of the template upgrade timelock, the only account that may upgrade app templates (existing launches
@@ -97,7 +98,7 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
     ///      (after OWNER_TIMELOCK_DELAY). Must differ from both Safes and from every hot key.
     address internal constant GUARDIAN = address(0);
 
-    /// @dev Delay of every owner call (factory, app registry, guard, hook, lockers). User decision 2026-11-01: every
+    /// @dev Delay of every owner call (factory, app registry, guard). User decision 2026-11-01: every
     ///      mainnet update delay is 0 (was 24 hours); raise it later with `updateDelay` through the timelock itself
     ///      (UpdatePikaImplementations PONS_OWNER_TIMELOCK_DELAY).
     uint256 internal constant OWNER_TIMELOCK_DELAY = 0;
@@ -125,6 +126,8 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
     address public constant VAULT = 0x238a358808379702088667322f80aC48bAd5e6c4;
     address public constant CL_POOL_MANAGER = 0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b;
     address public constant UNIVERSAL_ROUTER = 0xd9C500DfF816a1Da21A48A732d3498Bf09dc9AEB;
+    /// @dev Pancake's official CL position manager (the LP NFT "Pancakeswap Infinity Positions NFT").
+    address public constant CL_POSITION_MANAGER = 0x55f4c8abA71A1e923edC303eb4fEfF14608cC226;
     address public constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     /// @dev BSC-USD (Binance-Peg Tether), 18 decimals.
     address public constant USDT = 0x55d398326f99059fF775485246999027B3197955;
@@ -221,7 +224,8 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         vm.startBroadcast(cfg.deployer);
         d.guard = new PikaGuard(cfg.deployer);
         d.treasury = cfg.treasury;
-        d.apps = _deployApps(cfg.deployer, address(d.guard), cfg.upgradeProposerSafe, cfg.upgradeDelay);
+        d.apps =
+            _deployApps(cfg.deployer, address(d.guard), cfg.upgradeProposerSafe, cfg.upgradeDelay, CL_POSITION_MANAGER);
         _deployFactory(cfg, d);
         _wire(cfg, d);
         d.lens = new PikaTradeLens();
@@ -301,6 +305,11 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         require(address(ICLPoolManager(CL_POOL_MANAGER).vault()) == VAULT, "wrong Infinity vault");
         require(UNIVERSAL_ROUTER.code.length != 0, "Infinity Universal Router missing");
         require(
+            address(IPikaPositionManager(CL_POSITION_MANAGER).clPoolManager()) == CL_POOL_MANAGER
+                && address(IPikaPositionManager(CL_POSITION_MANAGER).vault()) == VAULT,
+            "wrong Infinity position manager"
+        );
+        require(
             keccak256(bytes(IERC20Metadata(WBNB).symbol())) == keccak256("WBNB")
                 && IERC20Metadata(WBNB).decimals() == 18,
             "wrong WBNB"
@@ -333,10 +342,9 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         PikaHook hook = new PikaHook(vault, manager);
         d.components = PikaLaunchFactory.Components(
             address(new PikaRouter(WBNB, vault, manager)),
-            address(new PikaLocker(vault, manager, treasury)),
             address(new PikaOrderDeployer(hook)),
             address(hook),
-            address(new PikaLpManager(vault, manager, hook))
+            CL_POSITION_MANAGER
         );
         d.factory = PikaLaunchFactory(
             payable(
@@ -364,13 +372,12 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         PikaLaunchFactory.Components memory c = d.components;
         address factory = address(d.factory);
         PikaRouter(payable(c.router)).bindFactory(factory);
-        PikaLocker(c.locker).bindFactory(factory);
         PikaOrderDeployer(c.orderDeployer).bindFactory(factory);
         PikaHook(c.hook).bindFactory(factory);
         d.apps.registry.setFactory(factory, true);
         d.guard.setGuardian(cfg.guardian);
         _listApps(d.apps);
-        _configureSinks(d.apps, c.locker, cfg.keeper);
+        _configureSinks(d.apps, cfg.keeper);
         d.factory.setCore(OPENFOUR_CORE);
         d.factory.setTokenImplementation(d.modules.tokenImplementation, true);
         if (cfg.presetId != 0) d.factory.setPreset(cfg.presetId, true);
@@ -419,20 +426,19 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
     function _verifyMarkets(Config memory cfg, Deployment memory d) internal view {
         PikaLaunchFactory.Components memory c = d.components;
         address f = address(d.factory);
-        (address router, address locker, address orders, address hook, address lp) = d.factory.components(1);
+        (address router, address orders, address hook, address positionManager) = d.factory.components(1);
         require(
-            router == c.router && locker == c.locker && orders == c.orderDeployer && hook == c.hook
-                && lp == c.lpManager,
+            router == c.router && orders == c.orderDeployer && hook == c.hook
+                && positionManager == CL_POSITION_MANAGER,
             "published components"
         );
         require(
-            PikaLocker(c.locker).factory() == f && PikaOrderDeployer(c.orderDeployer).factory() == f
+            PikaRouter(payable(c.router)).factory() == f && PikaOrderDeployer(c.orderDeployer).factory() == f
                 && PikaHook(c.hook).factory() == f,
             "components not bound"
         );
         require(PikaOrderDeployer(c.orderDeployer).implementation() != address(0), "order manager");
-        require(PikaLocker(c.locker).treasury() == d.treasury, "locker treasury");
-        // Fee sinks: listed in order, the liquidity sink admitted by the locker, the keeper set.
+        // Fee sinks: listed in order, the liquidity sink minting through Pancake's position manager, the keeper set.
         PikaAppRegistry r = d.apps.registry;
         require(r.factories(f) && r.templateCount() == 3 && r.maxApps() == 1, "registry");
         address[3] memory targets = [d.apps.burn, d.apps.dividend, d.apps.liquidity];
@@ -441,7 +447,9 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
             PikaAppRegistry.Template memory t = r.templates(uint32(i));
             require(t.target == targets[i] && t.enabled && t.isDefault, "app templates");
         }
-        require(PikaLocker(c.locker).liquidityApps(d.apps.liquidity), "sinks not wired");
+        require(
+            address(PikaLiquidityApp(d.apps.liquidity).positionManager()) == CL_POSITION_MANAGER, "sinks not wired"
+        );
         require(r.keepers(cfg.keeper), "keeper not set");
     }
 
@@ -518,9 +526,8 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         _logOpenFourListing(d);
         console2.log("Pika preset id accepted by the hub (0 = later owner-timelock setPreset)", cfg.presetId);
         console2.log("Trading router", c.router);
-        console2.log("Infinity LP locker", c.locker);
         console2.log("Pool hook", c.hook);
-        console2.log("LP manager", c.lpManager);
+        console2.log("Pancake CL position manager (graduation LP NFTs to 0xdead)", c.positionManager);
         console2.log("Order deployer", c.orderDeployer);
         console2.log("Trade lens", address(d.lens));
         console2.log("App registry", address(d.apps.registry));

@@ -8,11 +8,11 @@ import { PikaAppBase } from "../src/pika-apps/PikaAppBase.sol";
 import { PikaBurnApp } from "../src/pika-apps/PikaBurnApp.sol";
 import { PikaDividendApp } from "../src/pika-apps/PikaDividendApp.sol";
 import { PikaLiquidityApp } from "../src/pika-apps/PikaLiquidityApp.sol";
-import { PikaLocker } from "../src/pika-market/infinity/PikaLocker.sol";
 
 /// @notice Deploys the app registry and the three default sinks (burn, dividend, liquidity), owned by the deployer
 ///         until the timelock handover; `_listApps` lists the templates after the factory deployment and
-///         `_configureSinks` wires the sinks to the locker and the keeper. The registry starts with `maxApps` 1: a
+///         `_configureSinks` names the keeper. The liquidity sink mints its burned positions through Pancake's CL
+///         position manager (`positionManager`). The registry starts with `maxApps` 1: a
 ///         launch binds at most one app besides the default sinks.
 /// @dev Template ids: 0 burn, 1 dividend, 2 liquidity, the default sinks. The optional staking, FOMO3D and land
 ///      templates were removed on 2026-10-30 (tag `contracts-all-apps-2026-10-30`). All are ERC1967 proxies over
@@ -29,10 +29,13 @@ abstract contract PikaAppsSetup {
         address liquidity;
     }
 
-    function _deployApps(address deployer, address guard, address upgradeProposer, uint256 upgradeDelay)
-        internal
-        returns (Apps memory a)
-    {
+    function _deployApps(
+        address deployer,
+        address guard,
+        address upgradeProposer,
+        uint256 upgradeDelay,
+        address positionManager
+    ) internal returns (Apps memory a) {
         require(upgradeProposer != address(0), "upgrade timelock proposer required");
         address[] memory roles = new address[](1);
         roles[0] = upgradeProposer;
@@ -40,7 +43,7 @@ abstract contract PikaAppsSetup {
         a.registry = new PikaAppRegistry(deployer, guard, address(a.upgradeTimelock));
         a.burn = _proxy(address(new PikaBurnApp(address(a.registry))));
         a.dividend = _proxy(address(new PikaDividendApp(address(a.registry))));
-        a.liquidity = _proxy(address(new PikaLiquidityApp(address(a.registry))));
+        a.liquidity = _proxy(address(new PikaLiquidityApp(address(a.registry), positionManager)));
     }
 
     function _proxy(address implementation) internal returns (address) {
@@ -55,13 +58,14 @@ abstract contract PikaAppsSetup {
             .addTemplate(
                 a.dividend, PikaAppRegistry.Kind.HolderBook, "dividend", PikaDividendApp(a.dividend).version(), true
             );
-        a.registry.addTemplate(a.liquidity, PikaAppRegistry.Kind.Contract, "liquidity", 2, true);
+        a.registry
+            .addTemplate(
+                a.liquidity, PikaAppRegistry.Kind.Contract, "liquidity", PikaLiquidityApp(a.liquidity).version(), true
+            );
     }
 
-    /// @dev The locker admits the liquidity sink, and `keeper` may run the sinks' trading entries. Runs while the
-    ///      deployer still owns the factory (the locker checks the factory's owner).
-    function _configureSinks(Apps memory a, address locker, address keeper) internal {
-        PikaLocker(locker).setLiquidityApp(a.liquidity, true);
+    /// @dev `keeper` may run the sinks' trading entries. Runs while the deployer still owns the registry.
+    function _configureSinks(Apps memory a, address keeper) internal {
         a.registry.setKeeper(keeper, true);
     }
 }

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-// Builds the Pancake Infinity Vault and CLPoolManager artifacts that tests deploy with `vm.deployCode`. No test
-// imports this file, so their code is compiled once here, with the production settings, and never inside a test.
+// Builds the Pancake Infinity Vault, CLPoolManager and CLPositionManager (the official LP NFT) artifacts that tests
+// deploy with `vm.deployCode`. No test imports this file, so their code is compiled once here, with the production
+// settings, and never inside a test.
 import { Vault } from "infinity-core/src/Vault.sol";
 import { CLPoolManager } from "infinity-core/src/pool-cl/CLPoolManager.sol";
+import { CLPositionManager } from "infinity-periphery/src/pool-cl/CLPositionManager.sol";
