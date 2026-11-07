@@ -5,6 +5,7 @@ import { Vm } from "forge-std/Vm.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { PikaInfinityFixture } from "./helpers/PikaInfinityFixture.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { PikaLaunchFactory } from "../../src/pika-launch/PikaLaunchFactory.sol";
 import { PikaToken } from "../../src/pika-launch/PikaToken.sol";
 import { PikaRouter } from "../../src/pika-launch/PikaRouter.sol";
@@ -47,14 +48,14 @@ contract PikaProjectFeesTest is PikaInfinityFixture {
     // Fee terms and launch checks
     // ---------------------------------------------------------------------------------------------------------
 
-    function testFeeCapIsThirtyPercentPerDirection() public {
-        PikaToken token = _launch(2970, 2970, new AppBinding[](0));
-        assertEq(token.outputFeeBps(true), 2970);
-        assertEq(token.outputFeeBps(false), 3000);
+    function testFeeCapIsTenPercentPerDirection() public {
+        PikaToken token = _launch(970, 970, new AppBinding[](0));
+        assertEq(token.outputFeeBps(true), 970);
+        assertEq(token.outputFeeBps(false), 1000);
         assertEq(token.PLATFORM_FEE_BPS(), 30);
         bytes memory invalid = abi.encodeWithSelector(PikaToken.InvalidConfiguration.selector);
-        _expectLaunchRevert(2971, 0, new AppBinding[](0), invalid);
-        _expectLaunchRevert(0, 2971, new AppBinding[](0), invalid);
+        _expectLaunchRevert(971, 0, new AppBinding[](0), invalid);
+        _expectLaunchRevert(0, 971, new AppBinding[](0), invalid);
         // A zero project fee is allowed: the launch charges the platform fee only.
         token = _launch(0, 0, new AppBinding[](0));
         assertEq(token.outputFeeBps(true), 0);
@@ -440,5 +441,131 @@ contract PikaProjectFeesTest is PikaInfinityFixture {
             ) return true;
         }
         return false;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Audit 2026-11-07 U-6: the fee wallet defaults to the creator and can hand the role over
+    // ---------------------------------------------------------------------------------------------------------
+
+    function testZeroFeeWalletMeansTheCreator() public {
+        LaunchParams memory p = _params(address(usdt), true);
+        p.creatorFeeRecipient = address(0);
+        p.buyFeeBps = 100;
+        p.sellFeeBps = 100;
+        _mineFor(CAROL, p, true);
+        PikaToken token = _launchAs(CAROL, p);
+        assertEq(token.creatorFeeRecipient(), CAROL, "zero means the creator");
+        assertEq(token.pendingCreatorFeeRecipient(), address(0));
+        _fill(token, address(usdt));
+        // The creator's graduation reward is credited to that wallet.
+        assertEq(token.creatorFees(address(usdt)), _vaultOf(token).totalRaised() / 100);
+        vm.prank(CAROL);
+        token.claimCreatorFees(CAROL);
+        assertEq(token.creatorFees(address(usdt)), 0);
+    }
+
+    function testFeeWalletHandsOverInTwoStepsWithItsAccruedFees() public {
+        PikaToken token = _launch(100, 100, new AppBinding[](0));
+        _fill(token, address(usdt));
+        _swap(token, CAROL, false, 100 ether);
+        uint256 owedQuote = token.creatorFees(address(usdt));
+        assertGt(owedQuote, 0);
+        // Only the wallet proposes, and never the token or one of the launch's own accounts.
+        vm.prank(BOB);
+        vm.expectRevert(PikaToken.UnauthorizedComponent.selector);
+        token.proposeCreatorFeeRecipient(BOB);
+        address router_ = token.tradingRouter();
+        vm.startPrank(CREATOR);
+        vm.expectRevert(PikaToken.InvalidConfiguration.selector);
+        token.proposeCreatorFeeRecipient(address(token));
+        vm.expectRevert(PikaToken.InvalidConfiguration.selector);
+        token.proposeCreatorFeeRecipient(router_);
+        vm.expectRevert(PikaToken.InvalidConfiguration.selector);
+        token.proposeCreatorFeeRecipient(address(vault));
+        vm.expectEmit(address(token));
+        emit PikaToken.CreatorFeeRecipientProposed(CREATOR, BOB);
+        token.proposeCreatorFeeRecipient(BOB);
+        vm.stopPrank();
+        assertEq(token.pendingCreatorFeeRecipient(), BOB);
+        assertEq(token.creatorFeeRecipient(), CREATOR, "unchanged until accepted");
+        // Nobody but the proposed wallet accepts; the current wallet may withdraw the proposal.
+        vm.prank(DAVE);
+        vm.expectRevert(PikaToken.UnauthorizedComponent.selector);
+        token.acceptCreatorFeeRecipient();
+        vm.prank(CREATOR);
+        token.proposeCreatorFeeRecipient(address(0));
+        assertEq(token.pendingCreatorFeeRecipient(), address(0));
+        vm.prank(BOB);
+        vm.expectRevert(PikaToken.UnauthorizedComponent.selector);
+        token.acceptCreatorFeeRecipient();
+        vm.prank(CREATOR);
+        token.proposeCreatorFeeRecipient(BOB);
+        vm.expectEmit(address(token));
+        emit PikaToken.CreatorFeeRecipientChanged(CREATOR, BOB);
+        vm.prank(BOB);
+        token.acceptCreatorFeeRecipient();
+        assertEq(token.creatorFeeRecipient(), BOB);
+        assertEq(token.pendingCreatorFeeRecipient(), address(0));
+        // The accrued fees now belong to the new wallet; the old one can neither claim nor propose again.
+        vm.startPrank(CREATOR);
+        vm.expectRevert(PikaToken.UnauthorizedComponent.selector);
+        token.claimCreatorFees(CREATOR);
+        vm.expectRevert(PikaToken.UnauthorizedComponent.selector);
+        token.proposeCreatorFeeRecipient(CREATOR);
+        vm.stopPrank();
+        uint256 before = usdt.balanceOf(BOB);
+        vm.prank(BOB);
+        token.claimCreatorFees(BOB);
+        assertGe(usdt.balanceOf(BOB) - before, owedQuote, "accrued fees go to the new wallet");
+        assertEq(token.creatorFees(address(usdt)), 0);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Audit 2026-11-07 U-6: the owner replaces the treasury in two steps and every launch follows
+    // ---------------------------------------------------------------------------------------------------------
+
+    function testTreasuryIsReplacedInTwoStepsAndEveryLaunchFollows() public {
+        PikaToken token = _launch(100, 100, new AppBinding[](0));
+        _fill(token, address(usdt));
+        assertEq(token.treasury(), TREASURY);
+        assertTrue(token.isPlatformAccount(TREASURY));
+        address next = address(0x7e5);
+        // Only the owner proposes; only the proposed address accepts; zero withdraws.
+        vm.prank(ALICE);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, ALICE));
+        factory.proposeTreasury(next);
+        vm.expectRevert(PikaLaunchFactory.InvalidConfiguration.selector);
+        factory.proposeTreasury(address(factory));
+        factory.proposeTreasury(next);
+        assertEq(factory.pendingTreasury(), next);
+        assertEq(factory.treasury(), TREASURY, "unchanged until accepted");
+        vm.prank(ALICE);
+        vm.expectRevert(PikaLaunchFactory.Unauthorized.selector);
+        factory.acceptTreasury();
+        factory.proposeTreasury(address(0));
+        vm.prank(next);
+        vm.expectRevert(PikaLaunchFactory.Unauthorized.selector);
+        factory.acceptTreasury();
+        factory.proposeTreasury(next);
+        vm.expectEmit(address(factory));
+        emit PikaLaunchFactory.TreasuryChanged(TREASURY, next);
+        vm.prank(next);
+        factory.acceptTreasury();
+        assertEq(factory.treasury(), next);
+        assertEq(factory.pendingTreasury(), address(0));
+        // Every launch reads the hub: the next push pays the new treasury, and it is the platform account now.
+        assertEq(token.treasury(), next);
+        assertTrue(token.isPlatformAccount(next));
+        assertFalse(token.isPlatformAccount(TREASURY));
+        uint256 oldQuote = usdt.balanceOf(TREASURY);
+        _swap(token, CAROL, false, 100 ether);
+        assertEq(usdt.balanceOf(TREASURY), oldQuote, "the old treasury gets nothing more");
+        assertGt(usdt.balanceOf(next), 0, "the platform fee reached the new treasury");
+        // The graduation quote still owed goes to the new treasury too.
+        uint256 owed = factory.pendingTreasuryQuote(address(usdt));
+        assertGt(owed, 0);
+        uint256 before = usdt.balanceOf(next);
+        factory.claimTreasuryQuote(address(usdt));
+        assertEq(usdt.balanceOf(next) - before, owed);
     }
 }

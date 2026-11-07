@@ -2,243 +2,191 @@
 
 [中文](README.zh-CN.md)
 
-Pika is a token launch platform built on [OpenFour](https://four.meme). A launch is created by OpenFour's Core from the
-Pika preset and trades on OpenFour's bonding curve (the inner market). When the sale sells out, it graduates into a
-Pancake Infinity concentrated-liquidity pool guarded by Pika's hook (the outer market).
+Protocol **12**, contracts **v12.7.0**, exported from `johnyjt/pika` commit `ad604a1`.
+This repository contains the source and focused tests submitted for OpenFour review. It does not contain production
+credentials, deployment records, server code, or operational tooling. The descriptions below refer to this source
+snapshot; they do not assert that any live deployment has been upgraded.
 
-This repository holds the contracts and tests submitted for OpenFour's review. Protocol version 12; the contracts
-version is in `package.json` and each release is tagged (`v12.3.0`).
+## Review scope
 
-## Changes in v12.3.0 (since v12.2.0)
+| Contract | Role | Source |
+| --- | --- | --- |
+| `PikaToken` | Fixed-supply token implementation, cloned by Core (EIP-1167); tag `token.pika` | `src/pika-launch/PikaToken.sol` |
+| `PikaTokenModule` | Initializes the token; tag `module.token.pika` | `src/pika-launch/openfour/PikaTokenModule.sol` |
+| `PikaMigrateModule` | Moves a sold-out launch into Infinity; tag `module.migrate.pika_infinity` | `src/pika-launch/openfour/PikaMigrateModule.sol` |
+| `PikaLaunchFactory` | Preset validator, trusted launch registry, graduation hub | `src/pika-launch/PikaLaunchFactory.sol` |
 
-Three behaviour changes from the 2026-11-07 fresh audit (`docs/audit-2026-11-07-fresh-review.md` in the main
-repository); no interface, storage-layout or event change.
+OpenFour supplies the registered `module.vault.standard` (`VAULT_BASIC`), `module.curve.bonding`
+(`CURVE_BONDING`) and `module.trade.simple` (`TRADE_SIMPLE`) modules. There is no custom-data module.
+Core, Registry, Tools, FeeRouter, the production curve and trade module are external dependencies, not audited source
+in this repository. Their public interfaces and the reference standard vault are included under `src/openfour/`.
 
-- **Concentrated liquidity only from the launch's order manager (U-1).** On a pool without an LP fee a concentrated
-  position earns nothing and is only ever a limit order, and one added through Pancake's position manager was a
-  fee-free one. `PikaHook.beforeAddLiquidity` now admits a position that is not the full range only when the locker
-  is the launch's `orderManager()`, which charges the launch's fee when the order is claimed. Full-range positions
-  stay open to everyone (the graduation NFT, the liquidity sink, third parties): two-sided at every price, they cannot
-  stand in for an order. Removing is still not hooked.
-- **Dividend exclusion pays wallets (U-2).** `PikaDividendApp` (template v12) `setExcluded(token, account, true)`
-  zeroes the account's shares and settles what it earned: an account without code is paid at once through the claim
-  path (`DividendClaimed`); a contract's earnings return to the launch's unreleased fees as before, since a pool cannot
-  claim. The owner can no longer take a wallet's earned dividends.
-- **Empty fee pushes leave `lastPushAt` alone (U-9).** `PikaToken.pushFees` records the time only when it paid
-  something, so the keeper's "last paid" age is not reset by a push that found nothing booked.
-- **Reviewed contracts touched:** the token (`pushFees`). The hub, `PikaTokenModule` and `PikaMigrateModule` are
-  unchanged.
+All Pika outer-market code is included so the review can follow the four reviewed contracts' complete call graph:
 
-## Changes in v12.2.0 (since v12.0.0)
+- `src/pika-market/`: Infinity hook and limit-order manager.
+- `src/pika-apps/`: App registry, burn, dividend and liquidity templates.
+- `src/common/`: guardian seat, fee math and burned-liquidity minting.
+- `src/pika-launch/`: hub, token, modules, router, order-manager deployer and trade lens.
+- `script/`: only the deployment scripts/helpers used by the fork tests.
+- `lib/`: pinned git submodules; OpenZeppelin is **5.4.0** for Pika, while the vendored OpenFour token uses **4.9.6**.
 
-- **Graduation burns its liquidity the standard way.** The opening position is minted through Pancake's official
-  `CLPositionManager` as a full-range LP NFT owned by `0x…dEaD`, the Infinity counterpart of sending V2 LP tokens to
-  the dead address. That contract has no owner and is not upgradeable, and only an NFT's owner (or an account it
-  approved) can decrease or burn it, so the liquidity can never leave the pool. `PikaLocker` is removed.
-- **Liquidity is open.** Anyone may add and remove liquidity on a launch pool, through Pancake's position manager or
-  any vault locker, without fees. `PikaLpManager` is removed. The hook only requires a position that touches either
-  usable end of the tick range to be exactly the full range.
-- **Leftovers.** After minting, the hub burns the meme it has left (the curve's unsold remainder, rounding) to
-  `0x…dEaD` and books the quote it has left for the treasury, which claims it from the hub (`claimTreasuryQuote`).
-  New hub events: `GraduationPositionBurned`, `TreasuryQuoteAccrued`, `TreasuryQuoteClaimed`. The hub's components are
-  `(router, orderDeployer, hook, positionManager)`.
-- **Token.** `locker()` and `lpManager()` are gone; the position manager counts as a platform account (it holds no
-  dividend shares).
-- **Tick spacing 50.** Launch pools used a tick spacing of 1; it is now 50. Position and limit-order bounds step by
-  about 0.5% in price, and the full range is ±887250 (`TickMath.minUsableTick` / `maxUsableTick`). Prices still move
-  freely.
-- **Reviewed contracts touched:** the hub and the token. `PikaTokenModule` and `PikaMigrateModule` are unchanged.
+`OpenFourToken._beforeTokenTransfer` is virtual so Pika can override the standard migrated-pool restriction.
+Pika has no venue lock; its migrate module does not populate that pool list. The standard vault copy is used by
+local tests; real launches use the registered OpenFour vault.
 
-## What is under review
+## Lifecycle and fund flows
 
-| Contract | Role in the preset | Tag | Source |
-| --- | --- | --- | --- |
-| `PikaToken` | Token implementation (Core clones it, EIP-1167) | `token.pika` | `src/pika-launch/PikaToken.sol` |
-| `PikaTokenModule` | Token module | `module.token.pika` | `src/pika-launch/openfour/PikaTokenModule.sol` |
-| `PikaMigrateModule` | Migrate module | `module.migrate.pika_infinity` | `src/pika-launch/openfour/PikaMigrateModule.sol` |
-| `PikaLaunchFactory` (the hub) | Preset validator, launch registry, graduation | — | `src/pika-launch/PikaLaunchFactory.sol` |
+1. The creator calls OpenFour `Core.createToken(createArgs, signature)`. The hub validates the preset, supply,
+   quote, target, fee rates and parameter shape. Core deploys the token and module instances atomically.
+2. During initialization the token registers with the hub, binds its apps, and pins the current outer components.
+   The hub admits only EIP-1167 clones of allowed Pika implementations. The full supply is minted to OpenFour's vault.
+3. Core runs the inner buys and sells on the bonding curve. The sale allocation is **80%** of supply; OpenFour's
+   FeeRouter handles inner-market fees. There is no Pika per-address purchase cap.
+4. The standard vault reports sold out with at most **one whole token** remaining for sale. Core calls the migrate
+   module, which transfers the vault's tokens and quote to the hub. Graduation checks the trusted Core's actual
+   record, allowed preset, calling migrate module, sold-out state, available balances and an unlocked Infinity vault.
+5. The hub initializes the launch pool, deploys its order manager, and credits **1% of the actual raise** to the
+   creator's claimable quote fees. **20% of supply + 98% of the actual raise** fund a full-range Pancake Infinity
+   `CLPositionManager` NFT minted directly to `0x000000000000000000000000000000000000dEaD`.
+6. Unsold/rounding meme is sent to the burn address. Remaining quote, including extra vault receipts, is booked
+   as `pendingTreasuryQuote`. Anyone may trigger its payment to the treasury. The pool then opens for trading.
 
-The other slots use OpenFour's registered modules:
+The NFT owner cannot be recovered; Pika has no entry to withdraw the graduation liquidity. This relies on the
+configured official position manager and Infinity contracts. The pool uses tick spacing **50**, full range
+**[-887250, 887250]**, and **zero LP fee**.
 
-| Slot | Module | Tag | Registry key |
-| --- | --- | --- | --- |
-| Vault | `StandardVault` | `module.vault.standard` | `VAULT_BASIC` |
-| Curve | `BondingCurveModule` | `module.curve.bonding` | `CURVE_BONDING` |
-| Trade | `SimpleTradeModule` | `module.trade.simple` | `TRADE_SIMPLE` |
-| Custom data | None | — | `customDataId = 0` |
+## Admission and fees
 
-The rest of `src/` is the outer market: the migration target and the contracts the token calls. It is included so the
-review can follow every call the four contracts make, and so the tests build. None of it is registered with OpenFour.
+- Default supply is **1,000,000,000 tokens**, with 18 decimals. An owner-configured supply must be between
+  `MIN_SUPPLY = 1_000_000 ether` and `1e36` smallest units. The lower bound limits the one-token sale remainder's
+  missing raise to approximately **5 ppm**, apart from quote-unit rounding.
+- Supply and the 80/20 allocation are checked at creation. The quote must be enabled, with recorded decimals
+  between 6 and 18. The configured target floor in this snapshot is `MIN_TARGET_FLOOR = 1e15` smallest quote units;
+  the per-quote minimum can be higher. Creation also checks that the opening pool price/liquidity is representable.
+- Quote accounting assumes plain, non-rebasing ERC20 transfers without transfer taxes; quote admission is an owner responsibility.
+- Only `tokenParams` carries creator configuration. Vault, curve, trade, migrate and custom-data parameters are empty.
+- Each outer direction charges a **0.3% platform fee** plus a fixed project fee; the sum of configured rates is at
+  most **10%**. Platform fees are always quote. Buy project fees are meme output; sell project fees are quote output.
+- The platform receives **10% of the project fee**. The rest goes to bound app slots and the creator's remainder.
+  Trading only books fees. `pushFees` transfers and notifies apps atomically; a failed transfer/notification rolls
+  the entire push back. Already-accrued creator claims can survive a failed automatic push.
+- The hook charges any router/locker using the launch pool. Other pools and venues remain available to the token.
+  Full-range liquidity is open to third parties; other ranges must be created by the launch's order manager, which
+  charges order fees on claim. A fully converted order can convert back until `settle` removes its position.
 
-## Layout
+## v12.7.0 changes since v12.6.1 and upgrade compatibility
 
-| Path | Contents |
-| --- | --- |
-| `src/pika-launch/` | Hub, token, the two OpenFour modules (`openfour/`), router, trade lens, order-manager deployer |
-| `src/pika-market/` | Outer market: `PikaHook` and `PikaOrderManager` (limit orders) |
-| `src/pika-apps/` | App registry and the three default fee apps (burn, holder dividends, liquidity) |
-| `src/common/` | Guardian seat (`PikaGuard`), fee math, and `PikaBurnedLiquidity`: mints a full-range Pancake LP NFT to the burn address (the hub at graduation, the liquidity app) |
-| `src/openfour/` | OpenFour's public interfaces, `OpenFourTypes`, `OpenFourToken`, `StandardVault` and the OpenZeppelin 4.9.6 files `OpenFourToken` uses, copied unchanged from `four-meme-community/openfour-docs` (MIT). The `StandardVault` copy is only used by the local tests. |
-| `src/mocks/` | Mock USDT for testnet deployments |
-| `test/` | Tests (see below) |
-| `script/` | Testnet and mainnet deployment scripts (the fork tests run them) |
-| `lib/` | Git submodules: forge-std 1.12.0, OpenZeppelin 5.4.0 (with upgradeable), Pancake `infinity-core` and `infinity-periphery`, plus two of their own submodules the tests need for Pancake's real `CLPositionManager`: `infinity-periphery/lib/permit2` and `infinity-core/lib/solmate` |
+- **Dividend template v14:** existing shares no longer bypass platform-account eligibility checks. Claims refresh
+  the holder's eligibility too. Previously accrued earnings are preserved. **Before accepting a new treasury**, the
+  operator must pre-exclude that address on every affected launch and verify zero shares, using bounded batches.
+  Lazy checks cannot reconstruct a treasury change's historical time on an older hub. New launches should be paused
+  while fixing the rotation's launch list; the old treasury can be refreshed after the switch.
+- **Burn template v3 / liquidity template v4:** `buybackLimited` and `addLiquidityLimited` and their batch variants
+  restrict dispatches to explicit budgets. Unselected funds and fees received after preparation stay pending.
+  Liquidity spending is checked against both budgets and launch books remain separate even when they share quote.
+- **Real swap preview:** `previewSwap` calls an authenticated self-only `simulateSwap`, executes the router swap,
+  and catches its deliberate revert. Transfers, approvals, pool state and fee booking are all rolled back. Even
+  an on-chain preview transaction cannot spend the app's funds.
+- **Minimum output:** an actual swap requires a nonzero minimum. Balanced liquidity that needs no swap may use zero.
+  Existing dispatch entry points are retained; new keepers can select bounded entry points by on-chain template version.
+- **Supply admission:** small supplies that can be sold out immediately or graduate far below target are refused
+  before launch creation. OpenFour's sold-out rule and migration execution are unchanged.
 
-## Lifecycle
+Compared with main-repository v12.6.1, compiler-generated layouts of all three templates are unchanged. These template updates add **no storage fields**: new structs are memory/calldata budgets. Upgrades follow the existing
+registry/UUPS authority checks. Existing non-upgradeable hubs/tokens do not change when this source is published.
+A keeper remains trusted to choose honest price protections: the contracts have no independent price oracle. Server-side
+price-impact and historical-price checks are outside this repository and do not protect against a malicious keeper key.
 
-1. **Create.** The creator calls `Core.createToken(createArgs, signature)`.
-   - Core asks the validator first. The hub's `validate` checks the whole composition (see below).
-   - Core deploys the module proxies and clones `PikaToken`. The token address is
-     `CREATE2(CreateDeployer, tokenSalt, clone code)`.
-   - The token module initializes the token. While it initializes, the token calls `hub.registerLaunch`. The hub
-     accepts only clones of an allowed Pika token implementation, binds the launch's apps through the app registry,
-     and pins the current outer components to the token.
-   - The whole supply is minted to OpenFour's vault.
-2. **Inner market.** All trades go through Core (`buy`, `buyByBudget`, `sell`) on OpenFour's bonding curve: 80% of
-   the supply sells for exactly the raise target. OpenFour's FeeRouter takes the inner fees. There is no per-address
-   purchase limit.
-3. **Graduation.** It happens inside the buy that leaves at most one token for sale (the standard vault's sold-out
-   rule).
-   - Core calls `PikaMigrateModule`, which moves the vault's quote and tokens to the hub and calls `hub.graduate`.
-   - The hub checks Core's record of the token: the token exists, it was created under an allowed preset and Core, the
-     caller is that launch's migrate module, and the sale sold out.
-   - The hub registers the pool with `PikaHook` and initializes it at the curve's final price.
-   - It deploys the launch's order manager.
-   - It credits 1% of the raise to the creator's fee wallet, claimable from the token.
-   - It mints the opening position through Pancake's `CLPositionManager`: the 20% of the supply the curve kept, plus
-     98% of the raise, over the full range (±887250), as an LP NFT owned by `0x…dEaD`. Nobody can remove it.
-   - It burns the meme it has left to `0x…dEaD`. The rest of the quote is owed to the treasury.
-   - Outer trading opens.
-   - The module returns `abi.encode(bytes32 poolId)` (migrated data version 1).
-4. **Outer market.** The launch pool is a Pancake Infinity CL pool with `PikaHook`, a 0% LP fee and a tick spacing
-   of 50.
-   - The hook charges the fees inside the swap: a 0.3% platform fee plus the launch's own buy and sell fees, at most 30%
-     per direction in total. The platform takes 10% of each project fee.
-   - Any router or locker may trade; the hook has no whitelist.
-   - Anyone may add and remove liquidity, without fees. A position touching either usable end must be exactly the full
-     range: a few wei in a narrow range there would fill the end tick's liquidity cap and block later full-range
-     positions. Removing is not hooked. Donations are refused.
-   - Trades only book fees in the token. `pushFees` later pays the treasury, the creator's wallet and the apps.
-
-## The hub as validator
-
-`validate` (`IOpenFourPresetValidator`) accepts a creation only if all of these hold:
-
-- `maxSupply` equals the hub's `defaultSupply` (1,000,000,000 tokens with 18 decimals).
-- `raiseAmount` is at least the quote's minimum target and at least `MIN_TARGET_FLOOR` (`1e15`).
-- `saleAmount` equals `sizing(supply, target).saleAmount`, which is 80% of the supply (`SALE_BPS`).
-- The quote asset is an enabled ERC20 (BNB launches use WBNB; Core sends and receives native BNB).
-- The token parameters (`PikaTokenParams`: creator fee wallet, buy and sell fees, apps) are within bounds, and the app
-  registry accepts the app choices.
-- Every module parameter except `tokenParams` is empty: vault, curve, trade, migrate and custom data.
-
-Creation and graduation are allowed separately:
-
-- Turning a preset off (`setPreset(id, false)`) or replacing Core (`setCore`) stops new launches only.
-- Launches already on their curve still graduate under the preset and Core they were created with.
-- The owner withdraws that separately with `setGraduationPreset` or `setGraduationCore`.
+Other behavior already present in this snapshot: small dividend bookings join the current release window; excluded
+contracts retain accrued dividends and may claim them, with owner reclamation only after **180 days**; partial swap
+reservation refunds credit the swap caller's vault delta; treasury and creator fee-recipient changes use two-step acceptance.
 
 ## Trust and permissions
 
-- **Modules.** Their implementations take `(hub, core)` as immutables. An instance initializes only while
-  `hub.core()` is still that Core.
-- **Anyone can clone the token code outside Core.** Such a token can register with the hub, but it can never graduate:
-  graduation needs Core's record.
-- **Owner** (behind a timelock; ownership cannot be renounced). The hub's defaults, quotes, Core, allowed token
-  implementations and presets, and the outer components for later launches.
-- **Guardian** (`PikaGuard`). It can only tighten, and immediately: stop new launches, revoke a keeper, or disable or
-  pause an app template.
-- **OpenFour governance.** It keeps its usual powers over Core, the Registry (including module upgrades behind the
-  beacons) and the FeeRouter.
-- **Launched tokens** have no admin entry. A token's outer components stay the ones pinned at registration.
+- The hub owner controls admission/defaults and future components; it cannot mint tokens or withdraw burned LP.
+  Creation and graduation admission are separate so stopping new launches need not strand existing ones.
+- Clones initialized outside Core can register but cannot graduate without a trusted Core record.
+- Pika module implementations pin `(hub, core)` immutably. OpenFour governance retains beacon/Core/Registry powers.
+  Do not upgrade an existing beacon to an implementation wired to another hub/Core: its existing launches follow
+  that beacon too. Incompatible wiring or storage needs new module keys and a separately reviewed composition.
+- The platform's separate upgrade authority can upgrade shared App proxies, including for existing launches.
+  A faulty holder-book upgrade can block transfers; pausing a sink does not bypass holder accounting or stop claims.
+- Guardian powers only tighten: stop creation, revoke a keeper, disable a template or pause its trading entries.
+- Mainnet deployment scripts currently specify **zero owner and upgrade delay**, with Safe threshold checks.
+  This is a governance choice, not an enforced response window. Live permissions must be checked separately.
 
-## Compiler settings
+## Build and validation
 
-| Contracts | Compiler | Built by |
-| --- | --- | --- |
-| `PikaToken`, `PikaTokenModule`, `PikaMigrateModule`, `PikaLaunchFactory` | OpenFour's environment: solc 0.8.24, optimizer 200, viaIR, EVM paris (Hardhat's default for 0.8.24, as in `developer/startup`) | Hardhat 2.29.1 (`hardhat.config.js`) |
-| Everything else (outer market) | solc 0.8.26, optimizer 200, viaIR, EVM cancun | Hardhat, with the same settings as Foundry |
-
-- **Why the outer market keeps 0.8.26.** It uses transient storage (EIP-1153): reentrancy guards, the router's trader
-  context, and the hook's per-swap fee cache. Paris does not have it.
-- **The four reviewed contracts use no transient storage and no PUSH0.**
-- **They reach the outer market only through interfaces.** They never import its source, so each group compiles with
-  its own settings.
-- **The hub's only reentrancy guard is OpenZeppelin's storage `ReentrancyGuard`,** on `graduate` and
-  `claimTreasuryQuote`.
-- **The hub compiles a few libraries with it:** `src/common/libraries/PikaBurnedLiquidity.sol` and Pancake's math
-  libraries (`TickMath`, `LiquidityAmounts`, `CLPoolParametersHelper`). It calls the position manager through an
-  interface.
-- **Release bytecode comes from Hardhat.** Foundry compiles the whole tree with 0.8.26 for types and tests. The
-  deployment scripts and the default-profile tests create the four reviewed contracts from the Hardhat artifacts
-  (`script/PikaRelease.sol`), so they run the release bytecode.
-
-## Where this differs from a standard OpenFour preset
-
-- **Two custom modules** (token, migrate) and a custom token implementation. Vault, curve and trade are OpenFour's.
-- **The modules depend on the hub.** The token registers with the hub while it initializes. The hub is the validator.
-  The migrate module hands all funds to the hub, so the hub's state affects creation and graduation.
-- **The migration target is a hooked Pancake Infinity pool,** not a plain V2/V4 pool. Its opening liquidity is burned
-  as an LP NFT of Pancake's official position manager owned by `0x…dEaD`.
-- **The token extends `OpenFourToken`.**
-  - On every transfer it reports both balances to the launch's dividend holder book, if it has one. If the book
-    reverts, the transfer reverts.
-  - It books outer-market fees.
-  - It implements permit, and reports its domain with `eip712Domain()` (ERC-5267).
-- **The outer market uses a different compiler** (see above).
-
-## Build and test
+Use Node **>=22.13** (validated with Node 24), npm and Foundry. Run via-IR compilations one at a time.
 
 ```bash
-git clone https://github.com/pika-meme/pika-contracts.git && cd pika-contracts
-git submodule update --init          # not --recursive: only two of the dependencies' own submodules are needed
+git clone https://github.com/pika-meme/pika-contracts.git
+cd pika-contracts
+git submodule update --init
 git -C lib/pancake-infinity-periphery submodule update --init lib/permit2
 git -C lib/pancake-infinity-core submodule update --init lib/solmate
-npm ci                               # Node 22.13 or later (Hardhat refuses Node 20)
-npx hardhat compile                  # release artifacts
-FOUNDRY_PROFILE=lite forge test      # fast local suite (Foundry's own build of every contract)
-forge test                           # via-IR; deploys the four reviewed contracts from the Hardhat artifacts
+npm ci
+npx hardhat compile --concurrency 1
+FOUNDRY_PROFILE=lite forge test
+forge test
 ```
 
-The default profile needs `npx hardhat compile` first. A full via-IR build takes about 20 minutes, and one solc
-process can use about 9 GB of memory.
+| Source | Release compiler |
+| --- | --- |
+| Token, token module, migrate module, hub | Hardhat solc **0.8.24**, optimizer **200**, **viaIR**, **paris** |
+| Outer market and apps | solc **0.8.26**, optimizer **200**, **viaIR**, **cancun** |
 
-Fork tests are skipped unless enabled; see `.env.example`.
+The default Foundry tests deploy the four reviewed contracts from Hardhat artifacts through `PikaRelease`; build
+Hardhat first. The lite profile uses its own build of all contracts. The four reviewed contracts never import outer
+implementation code or use transient storage.
+
+Real-chain forks (local simulation only; nothing is broadcast):
 
 ```bash
-RUN_PIKA_FORK=true RPC_URL=<BSC mainnet RPC> forge test --match-path "test/fork/*"
-RUN_PIKA_OPENFOUR_FORK=true OPENFOUR_REGISTRY=<fork Registry> PRIVATE_KEY=<its owner> PONS_QUOTE=<mock USDT> \
-  forge test --match-path "test/openfour-fork/*" --isolate -vv
+RUN_PIKA_FORK=true RPC_URL=<BSC-mainnet-RPC> forge test --match-path 'test/fork/*'
+RUN_PIKA_OPENFOUR_FORK=true TESTNET_RPC_URL=<BSC-testnet-RPC> \
+  OPENFOUR_REGISTRY=<developer-owned-fork-registry> PRIVATE_KEY=<its-owner-and-Core-signer> \
+  PONS_QUOTE=<test-quote> forge test --match-path 'test/openfour-fork/*' --isolate -vv
 ```
 
-## Tests
-
-| File | Covers |
+| Tests | Coverage |
 | --- | --- |
-| `test/openfour/PikaOpenFourLaunch.t.sol` (31) | The lifecycle on a local stand-in for Core: creation and registration, the curve, inner sells, graduation and the opening price, validator rules, module parameters and versions, fake clones, presets and Cores allowed for creation and for graduation |
-| `test/openfour-fork/PikaOpenFourTestnetFork.t.sol` (7) | OpenFour's real Core on a BSC testnet fork: deploys with `DeployPikaTestnet`, then creates, trades and graduates; also bad signatures and parameters, fee routing with the standard vault, no purchase limit, token address from salt, and gas per step |
-| `test/fork/DeployPikaMainnet.t.sol` (4) | The mainnet deployment script on a BSC mainnet fork with OpenFour's real mainnet Core and Pancake Infinity: full stack, launches on both quotes, timelock handover |
-| `test/fork/OpenFourBondingCurve.t.sol`, `OpenFourSimpleTrade.t.sol` (3) | The local stand-ins for OpenFour's closed-source curve and trade modules match the live mainnet modules |
-| `test/pika-launch/PikaInfinityFlow.t.sol` (9) | Graduation into the Infinity pool and outer trading end to end |
-| `test/pika-launch/PikaProjectFees.t.sol`, `PikaFeeCut.t.sol`, `PikaAutoPush.t.sol`, `PikaPendingFees.t.sol`, `PikaFeePushReview.t.sol` (23) | The token's fee booking and pushes: project fees, the platform's cut, app slots, the creator's wallet |
-| `test/pika-launch/PikaGuardian.t.sol`, `PikaTimelock.t.sol` (13) | Guardian and timelock control of the hub |
-| `test/pika-launch/PikaAudit.t.sol`, `PikaAuditV10.t.sol` (6) | Regressions: a contract creator cannot block graduation (both quotes, both token orders); fee books match token balances on every fee path; a new holder earns dividends only for the time it holds |
-| `test/pika-market/PikaOpenLiquidity.t.sol` (6) | Graduation mints one full-range LP NFT (±887250) to the burn address; a stranger's tokens left in the position manager cannot stop graduation; anyone adds and removes liquidity without fees; only an NFT's owner takes it out; the treasury claims the graduation quote from the hub; the liquidity app's books stay covered |
+| `test/openfour/PikaOpenFourLaunch.t.sol` | Creation, validation, registration, inner trades, migration, fake clones, Core/preset changes |
+| `test/fork/DeployPikaMainnet.t.sol` | Real mainnet Core and Infinity, full deployment, role handover and both quote assets |
+| `test/fork/OpenFourBondingCurve.t.sol`, `OpenFourSimpleTrade.t.sol` | Local curve/trade stand-ins against registered mainnet implementations |
+| `test/openfour-fork/PikaOpenFourTestnetFork.t.sol` | Real testnet Core lifecycle, signatures, fees and per-step gas |
+| `test/pika-launch/PikaInfinityFlow.t.sol` | End-to-end graduation and outer trades |
+| Project fee, cut, pending fee, auto-push and fee-push tests | Fee accounting, destinations, atomic notifications and claims |
+| Guardian and timelock tests | Admission, pause, emergency and ownership boundaries |
+| `test/pika-market/PikaOpenLiquidity.t.sol` | Burned NFT, third-party liquidity, withdrawal ownership and shared app accounting |
+| `test/pika-launch/PikaTreasurySupplySafety.t.sol` | Treasury eligibility, pre-exclusion preserving earnings, minimum-supply boundary and graduation |
+| `test/pika-apps/PikaDispatchSafety.t.sol` | Preview rollback, self-call authentication, bounded balances, separate launches, zero minimum rejection and batch isolation |
 
-`test/helpers/` holds the local stand-ins:
-- `MockOpenFourCore`: Core, Registry, Tools and FeeRouter.
-- `OpenFourBondingCurve` and `OpenFourSimpleTrade`: the official curve and trade modules.
-- `InfinityArtifacts`: builds the real Pancake Infinity `Vault`, `CLPoolManager` and `CLPositionManager` that the
-  tests deploy.
-- `PikaLpHelpers`: third-party liquidity through the position manager, the way a wallet provides it.
+`test/helpers` contains local OpenFour stand-ins and real Infinity artifact deployment helpers. Local mocks are not
+an audit of OpenFour's closed-source internals. Gas depends on the selected apps and holder state; use
+`test_GasOnRealCore --isolate` for this release rather than gas figures from earlier releases.
 
-Gas on OpenFour's real Core (BSC testnet fork, `test_GasOnRealCore --isolate`):
+## Validation of this snapshot
+
+On 2026-11-07, a fresh clone with the pinned submodules passed:
+
+- Hardhat dual-compiler build (`--concurrency 1`).
+- Lite profile: **101 passed**.
+- Default release profile: **108 passed, 3 skipped**; real-chain suites were then enabled separately.
+- BSC mainnet fork: **7 passed** (Core, deployment and the curve/trade modules).
+- BSC testnet real-Core fork: **7 passed**, with `--isolate`.
+- Compiler-generated storage layouts of burn, dividend and liquidity templates match main-repository v12.6.1.
+
+The testnet fork's `test_GasOnRealCore --isolate` measured these transaction gas costs. They are a reproducible test
+scenario, not a bound for arbitrary apps, balances, calldata or network state.
 
 | Step | Gas |
-| --- | --- |
-| Create, with the dividend app | 3.24M |
-| Create, no apps | 3.01M |
-| Buy by amount, new holder | 522k |
-| Buy by amount, existing holder | 481k |
-| Sell | 452k |
-| Buy that sells out and graduates | 1.76M (minting the LP NFT; 1.56M in v12.0.0) |
+| --- | ---: |
+| Create with dividend app, no first buy | 3,278,723 |
+| Create without apps | 3,054,216 |
+| Budget buy, new holder | 1,028,851 |
+| Amount buy, new holder | 517,060 |
+| Amount buy, existing holder | 482,860 |
+| Sell | 454,170 |
+| Budget buy that graduates | 1,722,832 |
+| Amount buy without apps, new holder | 484,535 |

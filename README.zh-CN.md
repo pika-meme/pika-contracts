@@ -1,189 +1,160 @@
-# Pika 合约（OpenFour）
+# Pika 的 OpenFour 合约
 
 [English](README.md)
 
-Pika 是基于 [OpenFour](https://four.meme) 的发射平台。发射由 OpenFour Core 按 Pika 组合创建，在 OpenFour 的
-bonding 曲线上交易（内盘）；售罄后毕业进带 Pika Hook 的 Pancake Infinity 集中流动性池（外盘）。
-
-本仓库是提交 OpenFour 审核的合约和测试。协议版本 12；合约版本见 `package.json`，每个版本打 tag（`v12.3.0`）。
-
-## v12.3.0 的改动（相对 v12.2.0）
-
-2026-11-07 重新审计（主仓库 `docs/audit-2026-11-07-fresh-review.md`）带来的三处行为改动；接口、存储布局和事件都没变。
-
-- **集中区间的流动性只许本发射的挂单合约加（U-1）。** LP 费为 0 的池子上，集中区间的仓位不赚任何东西，只能当限价单用，经 Pancake 仓位合约加的就是免费挂单。`PikaHook.beforeAddLiquidity` 现在只在持锁方是该发射的 `orderManager()`（领取时收费）时放行非全区间的仓位。全区间仓位继续对所有人开放（毕业 NFT、流动性应用、第三方）：它在任何价位都是双边的，当不了挂单。撤仓仍不经 Hook。
-- **分红排除名单不再没收钱包的分红（U-2）。** `PikaDividendApp`（模板 v12）的 `setExcluded(token, account, true)` 先清掉该地址的份额，再结算它已赚到的：没有代码的地址当场付给它（走领取路径，发 `DividendClaimed`）；合约地址的收益照旧退回该发射的未释放池，因为池子领不了。owner 不能再拿走钱包已赚的分红。
-- **空推送不改 `lastPushAt`（U-9）。** `PikaToken.pushFees` 只在实际付了款时记录时间，没有东西可推的推送不会把 keeper 的"上次付款"年龄清零。
-- **审核合约中改动的：** 代币（`pushFees`）。中枢、`PikaTokenModule`、`PikaMigrateModule` 没改。
-
-## v12.2.0 的改动（相对 v12.0.0）
-
-- **毕业的流动性按标准方式销毁。** 开盘仓位经 Pancake 官方 `CLPositionManager` 铸成全区间 LP NFT，所有者 `0x…dEaD`，相当于 V2 把 LP 代币转给死地址。这个合约没有 owner、不能升级，减仓和销毁只认 NFT 所有者或其授权，所以流动性永远撤不出池子。删除 `PikaLocker`。
-- **流动性开放。** 任何人都能经 Pancake 仓位合约或任何 vault 持锁方在发射池加减仓，不收费。删除 `PikaLpManager`。Hook 只要求碰到可用 tick 两端的仓位必须正好是全区间。
-- **余数。** 铸完后中枢把剩下的 meme（曲线未售零头、取整）转给 `0x…dEaD`，剩下的报价币记给金库，由金库从中枢领取（`claimTreasuryQuote`）。中枢新事件：`GraduationPositionBurned`、`TreasuryQuoteAccrued`、`TreasuryQuoteClaimed`。中枢组件改为 `(router, orderDeployer, hook, positionManager)`。
-- **代币。** 去掉 `locker()`、`lpManager()`；仓位合约算平台账户（不参与分红）。
-- **tick 间距 50。** 发射池的 tick 间距从 1 改为 50：仓位和限价单的边界按约 0.5% 一档，全区间是 ±887250（`TickMath.minUsableTick` / `maxUsableTick`）。价格仍连续变化。
-- **审核合约中改动的：** 中枢和代币。`PikaTokenModule`、`PikaMigrateModule` 没改。
+协议版本 **12**，合约版本 **v12.7.0**，来自主仓库 `johnyjt/pika` 提交 `ad604a1`。
+本仓库只包含 OpenFour 审核所需的源码和测试，不含生产凭证、部署记录、服务端或运维工具。
+以下描述针对这份源码，不代表线上合约已经升级。
 
 ## 审核范围
 
-| 合约 | 在组合中的角色 | 标签 | 源码 |
-| --- | --- | --- | --- |
-| `PikaToken` | 代币实现（Core 按 EIP-1167 克隆） | `token.pika` | `src/pika-launch/PikaToken.sol` |
-| `PikaTokenModule` | token 模块 | `module.token.pika` | `src/pika-launch/openfour/PikaTokenModule.sol` |
-| `PikaMigrateModule` | migrate 模块 | `module.migrate.pika_infinity` | `src/pika-launch/openfour/PikaMigrateModule.sol` |
-| `PikaLaunchFactory`（中枢） | 组合校验器、发射登记、毕业 | — | `src/pika-launch/PikaLaunchFactory.sol` |
+| 合约 | 职责 | 源码 |
+| --- | --- | --- |
+| `PikaToken` | Core 克隆的固定供应量代币（EIP-1167），tag `token.pika` | `src/pika-launch/PikaToken.sol` |
+| `PikaTokenModule` | 初始化代币，tag `module.token.pika` | `src/pika-launch/openfour/PikaTokenModule.sol` |
+| `PikaMigrateModule` | 售罄后迁移至 Infinity，tag `module.migrate.pika_infinity` | `src/pika-launch/openfour/PikaMigrateModule.sol` |
+| `PikaLaunchFactory` | 组合校验、项目登记、毕业中枢 | `src/pika-launch/PikaLaunchFactory.sol` |
 
-其余槽位用 OpenFour 已登记的模块：
+其他槽使用 OpenFour 已登记的标准模块：`module.vault.standard`（`VAULT_BASIC`）、
+`module.curve.bonding`（`CURVE_BONDING`）、`module.trade.simple`（`TRADE_SIMPLE`），没有 custom-data 模块。
+Core、Registry、Tools、FeeRouter、生产曲线和交易模块是外部依赖，并非本仓库可审计源码。
+`src/openfour/` 收录其公开接口和标准 Vault 参考实现。
 
-| 槽位 | 模块 | 标签 | Registry 键 |
-| --- | --- | --- | --- |
-| vault | `StandardVault` | `module.vault.standard` | `VAULT_BASIC` |
-| curve | `BondingCurveModule` | `module.curve.bonding` | `CURVE_BONDING` |
-| trade | `SimpleTradeModule` | `module.trade.simple` | `TRADE_SIMPLE` |
-| customData | 无 | — | `customDataId = 0` |
+同时收录外盘源码，供审核跟踪四个合约的完整调用路径：
 
-`src/` 里的其余合约是外盘：迁移的去向，以及代币会调用的合约。收录它们是为了让审核能看清这四个合约的每一个外部调用，也为了测试能编译。它们都不在 OpenFour 登记。
+- `src/pika-market/`：Infinity hook、限价单管理器。
+- `src/pika-apps/`：App registry、销毁、分红、流动性模板。
+- `src/common/`：guardian、费用数学、销毁 LP 的铸造逻辑。
+- `src/pika-launch/`：中枢、代币、模块、路由、订单部署器、交易 lens。
+- `script/`：分叉测试会用到的部署脚本及 helper。
+- `lib/`：固定提交的 git 子模块。Pika 使用 OpenZeppelin **5.4.0**，OpenFour 代币基类使用其配套的 **4.9.6**。
 
-## 目录
+`OpenFourToken._beforeTokenTransfer` 加了 virtual，使 Pika 能覆盖标准的已登记池限制。
+Pika 不锁交易场所，迁移模块也不填该池名单。标准 Vault 源码副本用于本地测试，真实项目使用 OpenFour 已登记的实现。
 
-| 路径 | 内容 |
-| --- | --- |
-| `src/pika-launch/` | 中枢、代币、两个 OpenFour 模块（`openfour/`）、路由、报价合约、限价单部署器 |
-| `src/pika-market/` | 外盘：`PikaHook` 和 `PikaOrderManager`（限价单） |
-| `src/pika-apps/` | 应用登记表和三个默认手续费应用（销毁、持有者分红、加流动性） |
-| `src/common/` | Guardian 席位（`PikaGuard`）、手续费计算，以及 `PikaBurnedLiquidity`：铸全区间 Pancake LP NFT 给销毁地址（中枢毕业、加流动性应用共用） |
-| `src/openfour/` | OpenFour 公开的接口、`OpenFourTypes`、`OpenFourToken`、`StandardVault`，以及 `OpenFourToken` 用到的 OpenZeppelin 4.9.6 文件，原样拷自 `four-meme-community/openfour-docs`（MIT）。`StandardVault` 拷贝只给本地测试用 |
-| `src/mocks/` | 测试网部署用的模拟 USDT |
-| `test/` | 测试（见下） |
-| `script/` | 测试网、主网部署脚本（分叉测试会运行它们） |
-| `lib/` | git 子模块：forge-std 1.12.0、OpenZeppelin 5.4.0（含 upgradeable）、Pancake `infinity-core` 与 `infinity-periphery`，外加测试部署真实 `CLPositionManager` 需要的两个依赖自带子模块：`infinity-periphery/lib/permit2`、`infinity-core/lib/solmate` |
+## 生命周期与资金流
 
-## 生命周期
+1. 创建者调用 OpenFour `Core.createToken(createArgs, signature)`。中枢校验组合、供应量、报价资产、目标、费率和参数形状；Core 在同一交易部署代币和模块。
+2. 代币初始化时向中枢登记、绑定应用、固定外盘组件。中枢只接受允许实现的 EIP-1167 克隆。全部供应量铸给 OpenFour Vault。
+3. Core 执行曲线内盘买卖，销售份额为总量的 **80%**，内盘费用由 OpenFour FeeRouter 处理。Pika 不设单地址购买上限。
+4. 标准 Vault 在剩余待售不超过 **一整枚** 时判定售罄。迁移模块把 Vault 的两种资产转给中枢；中枢核对受信任 Core 的实际记录、组合、迁移调用者、售罄状态、到账余额和 Infinity Vault 未上锁。
+5. 中枢初始化池、部署订单管理器，将**实际募集额的 1%**记入创建者待领报价币费用。
+   **供应量的 20% + 实际募集额的 98%** 经 Pancake 官方 `CLPositionManager` 铸成全区间 NFT，所有者直接为 `0x000000000000000000000000000000000000dEaD`。
+6. 未售余量与舍入剩余代币转给销毁地址；剩余报价币（含 Vault 额外收入）记为 `pendingTreasuryQuote`，任何人可触发付给 treasury。随后开放外盘。
 
-1. **创建。** 创建者调 `Core.createToken(createArgs, signature)`。
-   - Core 先问校验器：中枢的 `validate` 检查整个组合（见下）。
-   - Core 部署模块代理，克隆 `PikaToken`。代币地址是 `CREATE2(CreateDeployer, tokenSalt, 克隆代码)`。
-   - token 模块初始化代币。代币初始化时调 `hub.registerLaunch`：中枢只接受已允许的 Pika 代币实现的克隆，经应用登记表绑定该发射的应用，并把当前的外盘组件固定到代币里。
-   - 全部供应铸给 OpenFour 的托管合约。
-2. **内盘。** 买卖都经 Core（`buy`、`buyByBudget`、`sell`），走 OpenFour 的 bonding 曲线：80% 的供应正好卖满募集目标。内盘手续费由 OpenFour FeeRouter 收。没有单地址限购。
-3. **毕业。** 发生在使待售剩余 ≤ 1 枚的那笔买入里（官方 vault 的售罄规则）。
-   - Core 调 `PikaMigrateModule`，它把托管合约的报价币和代币转给中枢，并调 `hub.graduate`。
-   - 中枢核对 Core 对该代币的记录：代币存在、按允许的组合和 Core 创建、调用者是该发射的 migrate 模块、已售罄。
-   - 中枢在 `PikaHook` 登记池子，按曲线终价初始化。
-   - 部署该发射的限价单合约。
-   - 把 1% 募集额记给创建者收费钱包，从代币里领取。
-   - 用曲线留下的 20% 供应加 98% 募集额，经 Pancake `CLPositionManager` 铸全区间（±887250）仓位，LP NFT 的所有者是 `0x…dEaD`，谁都撤不走。
-   - 剩下的 meme 转给 `0x…dEaD`，其余报价币记给金库。
-   - 开放外盘。
-   - 模块返回 `abi.encode(bytes32 poolId)`（迁移数据版本 1）。
-4. **外盘。** 发射池是带 `PikaHook` 的 Pancake Infinity CL 池，LP 费为 0，tick 间距 50。
-   - Hook 在 swap 内收费：0.3% 平台费，加上每个发射自己的买入费、卖出费，每个方向合计不超过 30%；平台抽项目费的 10%。
-   - 任何路由或持锁方都能交易，Hook 没有白名单。
-   - 任何人都能加减仓，不收费。碰到可用 tick 两端的仓位必须正好是全区间：否则几 wei 的窄区间就能占满端点 tick 的流动性上限，挡住之后的全区间仓位。撤仓不回调 Hook。拒绝捐赠。
-   - 交易只在代币里记账，之后由 `pushFees` 付给金库、创建者钱包和应用。
+Pika 没有取回毕业 LP 的入口；安全性依赖配置的官方 position manager 和 Infinity 合约。
+池的 tick spacing 为 **50**，全区间为 **[-887250, 887250]**，**LP 费率为零**。
 
-## 中枢作为校验器
+## 准入与费用
 
-`validate`（`IOpenFourPresetValidator`）只在以下条件全部满足时放行创建：
+- 默认供应量为 **十亿枚**、18 位精度。管理员可配置范围为 `MIN_SUPPLY = 1_000_000 ether` 到 `1e36` 最小单位。
+  一百万枚下限将最多一枚未售余量造成的募集偏差约束在约 **5 ppm** 以内，另计报价币最小单位舍入。
+- 创建时核对供应量和 80/20 分配。报价资产须启用，记录精度为 6～18；这份快照的全局目标下限为
+  `MIN_TARGET_FLOOR = 1e15` 报价币最小单位，各资产可另设更高门槛；同时检查开池价格和流动性可表示。
+- 报价币记账假定普通 ERC20 转账，不支持转账税或余额重定基；报价币的准入选择由 owner 负责。
+- 只有 `tokenParams` 带创建者配置；vault、curve、trade、migrate、custom-data 参数均为空。
+- 外盘每方向收 **0.3% 平台费**及固定项目费，配置费率之和最多 **10%**。平台费始终为报价币；买入项目费从代币输出扣，卖出项目费从报价币输出扣。
+- 平台抽取项目费的 **10%**，其余分给应用槽位及创建者。交易仅记账，`pushFees` 后续原子转账并通知应用；任一环节失败则整次回滚。自动推送失败不阻止领取此前已经记入创建者账本的费用。
+- 任意路由/locker 在发射池交易均经过 hook；代币仍可在其他池交易。第三方可提供全区间流动性，其他区间只准由项目订单管理器创建，订单领取时收费。
+  订单即使已完全换币，`settle` 移除仓位之前仍可能随价格反转而换回。
 
-- `maxSupply` 等于中枢的 `defaultSupply`（10 亿枚，18 位精度）。
-- `raiseAmount` 不低于该报价币的最低目标，也不低于 `MIN_TARGET_FLOOR`（`1e15`）。
-- `saleAmount` 等于 `sizing(supply, target).saleAmount`，即供应的 80%（`SALE_BPS`）。
-- 报价币是已启用的 ERC20（BNB 发射用 WBNB，Core 收发原生 BNB）。
-- 代币参数（`PikaTokenParams`：创建者收费钱包、买卖费率、应用）在范围内，且应用登记表接受所选应用。
-- 除 `tokenParams` 外的模块参数全部为空：vault、curve、trade、migrate、customData。
+## v12.7.0 相对 v12.6.1 的改动与升级兼容
 
-创建和毕业分开允许：
+- **分红模板 v14**：已有份额也重新检查平台账户资格，领取同样同步资格，保留已赚收益。
+  **新 treasury 接任前**，运营必须在所有相关项目中预先排除新地址、验证份额为零，分批处理。
+  按调用同步不能重建旧中枢历史上变更 treasury 的时间。固定轮换清单期间应暂停新建项目，切换后再刷新旧 treasury 的资格。
+- **销毁模板 v3 / 流动性模板 v4**：新增 `buybackLimited`、`addLiquidityLimited` 及批量入口，按显式预算派发。
+  未选资金和准备后新到的费用仍留在 pending；添加流动性的实际支出不得超过两侧预算，同一报价币的不同项目账本相互独立。
+- **真实交换预览**：`previewSwap` 通过仅限自身调用的 `simulateSwap` 执行路由交易，再捕获其主动回滚。
+  转账、授权、池状态和费用记账全部撤销；即使把预览作为链上交易发送也不能花掉 App 资金。
+- **最低输出**：实际交换必须给非零最低输出；已平衡、无需交换的加流动性允许零。
+  原派发接口保留，keeper 按链上模板版本选择限额入口。
+- **供应量准入**：在创建前拒绝会立即售罄或明显提前毕业的小供应量，不改变 OpenFour 的售罄条件或迁移执行。
 
-- 停用组合（`setPreset(id, false)`）或更换 Core（`setCore`）只停新发射。
-- 已在内盘的项目仍按创建时的组合和 Core 毕业。
-- owner 要撤销毕业，需单独调 `setGraduationPreset` 或 `setGraduationCore`。
+已对照主仓库 v12.6.1 比较三个模板的编译器存储布局，结果一致。这些模板升级**没有新增存储字段**，新增结构体仅用于 memory/calldata 预算。升级继续受原 registry/UUPS 权限约束。
+发布源码不会改变已部署的不可升级中枢和代币。Keeper 仍需诚实选择价格保护；合约没有独立价格预言机，服务端的价格冲击/历史价格检查不在本仓库内，也不能据此宣称已防恶意 keeper 密钥。
+
+本快照还包含此前已有行为：小额分红记账加入当前释放窗口；排除的合约保留可领收益，管理员只能在 **180 天**后回收未领部分；
+部分成交的费用预留退款记入交换调用者的 Vault delta；treasury 和创建者费用接收人均通过两步接任变更。
 
 ## 信任与权限
 
-- **模块。** 实现以 `(hub, core)` 为不可变量；实例只在 `hub.core()` 仍是这个 Core 时才能初始化。
-- **任何人都能在 Core 之外克隆代币代码。** 这样的代币能在中枢登记，但永远不能毕业，因为毕业需要 Core 的记录。
-- **owner**（在 timelock 后面，不能放弃所有权）：中枢的默认值、报价币、Core、允许的代币实现和组合，以及之后发射使用的外盘组件。
-- **Guardian**（`PikaGuard`）：只能收紧，立即生效。可以停止新发射、撤销 keeper、停用或暂停应用模板。
-- **OpenFour 治理**：保留对 Core、Registry（含 beacon 后的模块升级）和 FeeRouter 的通常权限。
-- **已发射的代币**没有管理入口；外盘组件保持登记时固定的版本。
+- 中枢 owner 控制新项目准入、默认值和未来组件，不能增发代币或取走销毁 LP。创建和毕业的准入分开，停止新创建不必阻断旧项目毕业。
+- Core 之外初始化的克隆可登记，但没有受信任 Core 记录不能毕业。
+- Pika 模块实现将 `(hub, core)` 固定为不可变量；OpenFour 治理保留 beacon、Core、Registry 等权限。已有项目也跟随 beacon，不能把旧 beacon 升级成绑定另一中枢/Core 的实现；不兼容的接线或存储应使用新模块键和单独审核的组合。
+- 平台的独立升级权限可升级共享 App，影响存量项目。错误的 holder-book 升级可能阻断转账；暂停 sink 不绕过持仓记账，也不暂停分红领取。
+- Guardian 只能收紧：停创建、撤销 keeper、禁用模板或暂停其交易入口。
+- 主网部署脚本当前的 owner 和升级延时均为 **零**，并检查 Safe 门槛。这是治理选择，不提供强制响应窗口；线上实际权限需要单独核对。
 
-## 编译环境
+## 构建与验证
 
-| 合约 | 编译器 | 构建 |
-| --- | --- | --- |
-| `PikaToken`、`PikaTokenModule`、`PikaMigrateModule`、`PikaLaunchFactory` | OpenFour 的环境：solc 0.8.24、optimizer 200、viaIR、EVM paris（Hardhat 对 0.8.24 的默认值，与 `developer/startup` 相同） | Hardhat 2.29.1（`hardhat.config.js`） |
-| 其余（外盘） | solc 0.8.26、optimizer 200、viaIR、EVM cancun | Hardhat，设置与 Foundry 相同 |
-
-- **外盘为什么保留 0.8.26：** 它用 transient 存储（EIP-1153），包括防重入锁、路由的交易者记录、Hook 每笔 swap 的费率缓存，paris 没有这个功能。
-- **审核的四个合约不用 transient 存储，也没有 PUSH0。**
-- **它们只经接口调用外盘，不 import 外盘源码，** 所以两组可以各用各的设置编译。
-- **中枢唯一的防重入锁是 OpenZeppelin 的存储版 `ReentrancyGuard`，** 用在 `graduate` 和 `claimTreasuryQuote` 上。
-- **中枢一起编译几个库：** `src/common/libraries/PikaBurnedLiquidity.sol` 和 Pancake 的数学库（`TickMath`、`LiquidityAmounts`、`CLPoolParametersHelper`）；它经接口调用仓位合约。
-- **发布字节码来自 Hardhat。** Foundry 用 0.8.26 编译整棵树，只用于类型和测试；部署脚本和默认配置的测试从 Hardhat 产物创建这四个合约（`script/PikaRelease.sol`），所以跑的是发布字节码。
-
-## 与标准 OpenFour 组合的不同
-
-- **两个自写模块**（token、migrate）和自写的代币实现。vault、curve、trade 用 OpenFour 的。
-- **模块依赖中枢。** 代币初始化时向中枢登记；中枢是校验器；migrate 模块把全部资金交给中枢。所以中枢的状态影响创建和毕业。
-- **迁移去向是带 Hook 的 Pancake Infinity 池，** 不是普通的 V2/V4 池。开盘流动性按标准方式销毁：Pancake 官方仓位合约的 LP NFT，所有者 `0x…dEaD`。
-- **代币继承 `OpenFourToken` 并有扩展：**
-  - 每次转账把双方余额报给该发射的分红簿（如果有）；分红簿回滚则转账回滚。
-  - 记外盘手续费。
-  - 实现 permit，并用 `eip712Domain()`（ERC-5267）报出签名域。
-- **外盘用了不同的编译器**（见上）。
-
-## 构建与测试
+使用 Node **≥22.13**（验证环境为 Node 24）、npm 和 Foundry。via-IR 编译一次只跑一路。
 
 ```bash
-git clone https://github.com/pika-meme/pika-contracts.git && cd pika-contracts
-git submodule update --init          # 不要 --recursive：依赖自己的子模块只需要下面两个
+git clone https://github.com/pika-meme/pika-contracts.git
+cd pika-contracts
+git submodule update --init
 git -C lib/pancake-infinity-periphery submodule update --init lib/permit2
 git -C lib/pancake-infinity-core submodule update --init lib/solmate
-npm ci                               # Node ≥ 22.13（Hardhat 已拒绝 Node 20）
-npx hardhat compile                  # 发布产物
-FOUNDRY_PROFILE=lite forge test      # 本地快速用例（所有合约都用 Foundry 自己编的）
-forge test                           # via-IR；审核的四个合约从 Hardhat 产物部署
+npm ci
+npx hardhat compile --concurrency 1
+FOUNDRY_PROFILE=lite forge test
+forge test
 ```
 
-默认配置要先 `npx hardhat compile`。完整的 via-IR 编译约 20 分钟，单个 solc 进程最多约用 9 GB 内存。
+| 源码 | 发布编译器 |
+| --- | --- |
+| 代币、代币模块、迁移模块、中枢 | Hardhat solc **0.8.24**、optimizer **200**、**viaIR**、**paris** |
+| 外盘与 App | solc **0.8.26**、optimizer **200**、**viaIR**、**cancun** |
 
-分叉测试默认跳过，变量见 `.env.example`：
+默认 Foundry 测试通过 `PikaRelease` 从 Hardhat 产物部署四个审核合约，所以必须先构建 Hardhat。
+lite 配置使用自己的全部合约产物。四个审核合约不 import 外盘实现，也不使用 transient storage。
+
+真实链分叉（仅本地模拟，不广播）：
 
 ```bash
-RUN_PIKA_FORK=true RPC_URL=<BSC 主网 RPC> forge test --match-path "test/fork/*"
-RUN_PIKA_OPENFOUR_FORK=true OPENFOUR_REGISTRY=<fork 的 Registry> PRIVATE_KEY=<其 owner> PONS_QUOTE=<模拟 USDT> \
-  forge test --match-path "test/openfour-fork/*" --isolate -vv
+RUN_PIKA_FORK=true RPC_URL=<BSC-mainnet-RPC> forge test --match-path 'test/fork/*'
+RUN_PIKA_OPENFOUR_FORK=true TESTNET_RPC_URL=<BSC-testnet-RPC> \
+  OPENFOUR_REGISTRY=<developer-owned-fork-registry> PRIVATE_KEY=<its-owner-and-Core-signer> \
+  PONS_QUOTE=<test-quote> forge test --match-path 'test/openfour-fork/*' --isolate -vv
 ```
 
-## 测试
-
-| 文件 | 内容 |
+| 测试 | 覆盖 |
 | --- | --- |
-| `test/openfour/PikaOpenFourLaunch.t.sol`（31） | 在本地 Core 替身上跑完整生命周期：创建与登记、曲线、内盘卖出、毕业与开盘价、校验规则、模块参数与版本、伪造克隆、组合和 Core 的“可创建”与“可毕业” |
-| `test/openfour-fork/PikaOpenFourTestnetFork.t.sol`（7） | BSC 测试网分叉上的 OpenFour 真实 Core：用 `DeployPikaTestnet` 部署后创建、交易、毕业；另有错误签名与参数、官方 vault 下的手续费去向、没有限购、由盐值决定代币地址、每步 gas |
-| `test/fork/DeployPikaMainnet.t.sol`（4） | 在 BSC 主网分叉上，用 OpenFour 真实主网 Core 和 Pancake Infinity 跑主网部署脚本：整套部署、两种报价币的发射、timelock 交接 |
-| `test/fork/OpenFourBondingCurve.t.sol`、`OpenFourSimpleTrade.t.sol`（3） | 本地对 OpenFour 闭源曲线和交易模块的替身，与主网上线的模块一致 |
-| `test/pika-launch/PikaInfinityFlow.t.sol`（9） | 毕业进 Infinity 池和外盘交易的端到端流程 |
-| `test/pika-launch/PikaProjectFees.t.sol`、`PikaFeeCut.t.sol`、`PikaAutoPush.t.sol`、`PikaPendingFees.t.sol`、`PikaFeePushReview.t.sol`（23） | 代币的手续费记账与推送：项目费、平台抽成、应用槽、创建者钱包 |
-| `test/pika-launch/PikaGuardian.t.sol`、`PikaTimelock.t.sol`（13） | Guardian 与 timelock 对中枢的控制 |
-| `test/pika-launch/PikaAudit.t.sol`、`PikaAuditV10.t.sol`（6） | 回归：合约创建者无法阻止毕业（两种报价币、两种代币排序）；每条收费路径上手续费账本与代币余额一致；新持有人只按持有时长分红 |
-| `test/pika-market/PikaOpenLiquidity.t.sol`（6） | 毕业铸一个全区间（±887250）LP NFT 给销毁地址；别人留在仓位合约里的币挡不住毕业；任何人免费加减仓；只有 NFT 所有者能撤；金库从中枢领毕业余款；加流动性应用的账始终有币覆盖 |
+| `test/openfour/PikaOpenFourLaunch.t.sol` | 创建、校验、登记、内盘、迁移、假克隆、Core/组合切换 |
+| `test/fork/DeployPikaMainnet.t.sol` | 真实主网 Core 与 Infinity、整套部署、权限交接、两种报价币 |
+| `test/fork/OpenFourBondingCurve.t.sol`、`OpenFourSimpleTrade.t.sol` | 本地替身与已登记主网实现的对照 |
+| `test/openfour-fork/PikaOpenFourTestnetFork.t.sol` | 真实测试网 Core 生命周期、签名、费用、分步 gas |
+| `test/pika-launch/PikaInfinityFlow.t.sol` | 毕业与外盘完整路径 |
+| Project fee、cut、pending fee、auto-push、fee-push 测试 | 费用记账、去向、原子通知和领取 |
+| Guardian、timelock 测试 | 准入、暂停、紧急与管理权限 |
+| `test/pika-market/PikaOpenLiquidity.t.sol` | 销毁 NFT、第三方流动性、提现权限、共享 App 账本 |
+| `test/pika-launch/PikaTreasurySupplySafety.t.sol` | Treasury 资格、预排除保留收益、最低供应量边界与毕业 |
+| `test/pika-apps/PikaDispatchSafety.t.sol` | 预览回滚、自调用鉴权、预算、项目隔离、零最低输出拒绝、批量失败隔离 |
 
-`test/helpers/` 里是本地替身：
-- `MockOpenFourCore`：Core、Registry、Tools、FeeRouter。
-- `OpenFourBondingCurve`、`OpenFourSimpleTrade`：官方的曲线和交易模块。
-- `InfinityArtifacts`：编出测试要部署的真实 Pancake Infinity `Vault`、`CLPoolManager` 和 `CLPositionManager`。
-- `PikaLpHelpers`：像钱包一样经仓位合约提供第三方流动性。
+`test/helpers` 包含本地 OpenFour 替身和真实 Infinity 产物部署 helper。本地 mock 不能替代对 OpenFour 闭源内部实现的审计。
+Gas 随应用和持仓状态变化，请用本版本 `test_GasOnRealCore --isolate` 重测，不沿用旧版本数字。
 
-OpenFour 真实 Core 上的 gas（BSC 测试网分叉，`test_GasOnRealCore --isolate`）：
+## 本快照验证结果
 
-| 步骤 | gas |
-| --- | --- |
-| 创建（带分红应用） | 324 万 |
-| 创建（无应用） | 301 万 |
-| 按数量买（新持有人） | 52.2 万 |
-| 按数量买（老持有人） | 48.1 万 |
-| 卖 | 45.2 万 |
-| 买空并毕业 | 176 万（多出的是铸 LP NFT；v12.0.0 为 156 万） |
+2026-11-07，在全新克隆及固定依赖上完成：
+
+- Hardhat 双编译器构建（`--concurrency 1`）通过。
+- lite 配置：**101 项通过**。
+- 默认发布配置：**108 项通过、3 项跳过**；随后单独启用真实链分叉测试。
+- BSC 主网分叉：**7 项通过**，覆盖 Core、部署和曲线/交易模块。
+- BSC 测试网真实 Core 分叉：**7 项通过**，使用 `--isolate`。
+- 销毁、分红、流动性模板的编译器存储布局与主仓库 v12.6.1 一致。
+
+测试网分叉的 `test_GasOnRealCore --isolate` 得到以下交易 gas。这是可复现的测试场景，不是任意应用、余额、calldata 或链状态的 gas 上限。
+
+| 步骤 | Gas |
+| --- | ---: |
+| 带分红应用创建，不首买 | 3,278,723 |
+| 无应用创建 | 3,054,216 |
+| 按预算买，新持有人 | 1,028,851 |
+| 按数量买，新持有人 | 517,060 |
+| 按数量买，已有持有人 | 482,860 |
+| 卖出 | 454,170 |
+| 按预算买并毕业 | 1,722,832 |
+| 无应用按数量买，新持有人 | 484,535 |

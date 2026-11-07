@@ -53,7 +53,7 @@ abstract contract PikaAppsSetup {
     /// @dev Lists the templates once the factory exists: the indexer follows the registry from the factory's
     ///      deployment block, so a template listed before it would never be watched.
     function _listApps(Apps memory a) internal {
-        a.registry.addTemplate(a.burn, PikaAppRegistry.Kind.Contract, "burn", 2, true);
+        a.registry.addTemplate(a.burn, PikaAppRegistry.Kind.Contract, "burn", PikaBurnApp(a.burn).version(), true);
         a.registry
             .addTemplate(
                 a.dividend, PikaAppRegistry.Kind.HolderBook, "dividend", PikaDividendApp(a.dividend).version(), true

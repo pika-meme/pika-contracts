@@ -2,6 +2,8 @@
 pragma solidity 0.8.26;
 
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { TransientSlot } from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import { ICLHooks } from "infinity-core/src/pool-cl/interfaces/ICLHooks.sol";
 import {
@@ -51,6 +53,7 @@ import { IPikaLaunchToken, IPikaHook } from "../interfaces/IPikaMarket.sol";
 ///      it, and kept in transient storage for the callback after it.
 contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
     using TransientSlot for *;
+    using SafeERC20 for IERC20;
     using CLPoolParametersHelper for bytes32;
 
     /// @notice Interface generation required by the current component release.
@@ -81,8 +84,13 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
 
     mapping(address token => Pool pool) private pools;
     mapping(PoolId id => address token) public override poolToken;
-    bytes32 private constant PENDING_FEE_TAG = keccak256("pika.hook.pendingFee");
-    bytes32 private constant TERMS_TAG = keccak256("pika.hook.terms");
+    /// @dev The swap in progress, in transient storage: `beforeSwap` writes the fee it reserved and the token's fee
+    ///      rates, `afterSwap` reads them. One slot each is enough (review 2026-11-07c, O-2): the pool manager runs a
+    ///      swap's two callbacks back to back with nothing but the pool's own math between them, every reservation
+    ///      is consumed by the callback of the same swap, and a revert anywhere in between discards the swap and
+    ///      these writes with it, so no other swap, locker or pool can ever observe them.
+    bytes32 private constant PENDING_FEE_SLOT = keccak256("pika.hook.pendingFee");
+    bytes32 private constant TERMS_SLOT = keccak256("pika.hook.terms");
 
     error InvalidConfiguration();
     error NotPoolManager();
@@ -268,8 +276,7 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
         address token = poolToken[key.toId()];
         IPikaLaunchToken.SwapTerms memory terms = IPikaLaunchToken(token).swapTerms();
         if (!terms.tradingStarted) revert TradingNotStarted();
-        address locker = vault.getLocker();
-        _storeTerms(token, locker, terms);
+        _storeTerms(terms);
         // Registration already fixed the token to this key; its side follows from the callback's currencies.
         bool memeIn = params.zeroForOne == (token == Currency.unwrap(key.currency0));
         if (params.amountSpecified < 0 && memeIn) {
@@ -277,7 +284,7 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
         }
         uint256 fee = _reservation(params, memeIn, terms);
         if (fee > uint256(uint128(type(int128).max))) revert AmountOverflow();
-        _slot(PENDING_FEE_TAG, token, locker).asUint256().tstore(fee);
+        PENDING_FEE_SLOT.asUint256().tstore(fee);
         // Bounded above by the AmountOverflow check.
         // forge-lint: disable-next-line(unsafe-typecast)
         return (this.beforeSwap.selector, toBeforeSwapDelta(int128(uint128(fee)), 0), 0);
@@ -303,9 +310,9 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
     struct Swap {
         address token;
         IPikaLaunchToken t;
+        /// @dev The account the pool manager books the swap's deltas for (its caller): the trader's locker, or
+        ///      Pika's router, which names the trader behind it.
         address sender;
-        /// @dev The locker holding the vault lock; the swap's transient state is scoped to it.
-        address locker;
         bool memeIs0;
         /// @dev Whether meme is the input (a sell) or the output (a buy).
         bool memeIn;
@@ -334,15 +341,13 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
         w.token = poolToken[key.toId()];
         w.t = IPikaLaunchToken(w.token);
         w.sender = sender;
-        // Transient state is scoped to the locker holding the vault lock; read once per swap.
-        w.locker = vault.getLocker();
         w.memeIs0 = w.token == Currency.unwrap(key.currency0);
         w.memeIn = params.zeroForOne == w.memeIs0;
         w.exactInput = params.amountSpecified < 0;
         // An int256 magnitude from the pool manager always fits.
         // forge-lint: disable-next-line(unsafe-typecast)
         w.specified = uint256(w.exactInput ? -params.amountSpecified : params.amountSpecified);
-        w.terms = _loadTerms(w.token, w.locker);
+        w.terms = _loadTerms();
         (w.meme, w.quote) = w.memeIs0 ? (key.currency0, key.currency1) : (key.currency1, key.currency0);
         (int128 memeDelta, int128 quoteDelta) =
             w.memeIs0 ? (delta.amount0(), delta.amount1()) : (delta.amount1(), delta.amount0());
@@ -368,7 +373,7 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
             hookDelta = int128(uint128(fee));
         } else {
             // Exact output: the reserved fee was added to the pool output and is already the hook's. A partial fill
-            // pays the fee on what the pool actually gave; the rest of the reservation goes back to the locker.
+            // pays the fee on what the pool actually gave; the rest of the reservation goes back to the locker's delta.
             fee = _settleReserved(w, w.quote, w.terms.platformBps + w.terms.sellBps);
         }
         uint256 platform = Math.min(PikaFeeMath.feeAt(w.gross, w.terms.platformBps), fee);
@@ -395,7 +400,7 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
         } else {
             // Exact output: the reserved project fee was added to the pool output and is already the hook's. A
             // partial fill (a price limit or the pool running dry) pays the fee on what the pool actually gave; the
-            // rest of the reservation goes back to the locker as ERC20. The platform fee is charged on top of the
+            // rest of the reservation goes back to the locker's delta. The platform fee is charged on top of the
             // quote the pool took, as the hook's delta on that side.
             project = _settleReserved(w, w.meme, w.terms.buyBps);
             platform = PikaFeeMath.feeOnNet(w.taken, w.terms.platformBps);
@@ -411,31 +416,43 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
 
     /// @dev An exact-output swap reserved the fee its output carries in `beforeSwap`, on top of the requested
     ///      output. A full fill pays exactly the reservation; a partial fill pays `bps` on the gross output and
-    ///      returns the rest of the reservation to the locker as ERC20. Returns the fee, which is the hook's to
-    ///      move.
+    ///      credits the rest of the reservation back to the locker's vault delta (`_refund`). Returns the fee, which
+    ///      is the hook's to move.
     function _settleReserved(Swap memory w, Currency asset, uint256 bps) private returns (uint256 fee) {
-        uint256 reserved = _takeReservation(w);
+        uint256 reserved = _takeReservation();
         if (w.gross < reserved) revert UnsupportedSwap();
         fee = w.gross == w.specified + reserved ? reserved : Math.min(PikaFeeMath.feeAt(w.gross, bps), reserved);
-        if (reserved > fee) vault.take(asset, w.sender, reserved - fee);
+        if (reserved > fee) _refund(asset, w.sender, reserved - fee);
     }
 
     /// @dev An exact-input buy reserved its platform fee out of the quote input in `beforeSwap`; the pool swapped
     ///      the rest. A full fill (the pool took all of the rest) pays exactly the reservation; a partial fill pays
-    ///      the platform fee on top of what the pool took and returns the rest of the reservation to the locker as
-    ///      ERC20. Returns the fee, which is the hook's to move.
+    ///      the platform fee on top of what the pool took and credits the rest of the reservation back to the
+    ///      locker's vault delta (`_refund`). Returns the fee, which is the hook's to move.
     function _settleReservedInput(Swap memory w) private returns (uint256 fee) {
-        uint256 reserved = _takeReservation(w);
+        uint256 reserved = _takeReservation();
         fee = w.taken == w.specified - reserved
             ? reserved
             : Math.min(PikaFeeMath.feeOnNet(w.taken, w.terms.platformBps), reserved);
-        if (reserved > fee) vault.take(w.quote, w.sender, reserved - fee);
+        if (reserved > fee) _refund(w.quote, w.sender, reserved - fee);
     }
 
-    function _takeReservation(Swap memory w) private returns (uint256 reserved) {
-        bytes32 pending = _slot(PENDING_FEE_TAG, w.token, w.locker);
-        reserved = pending.asUint256().tload();
-        pending.asUint256().tstore(0);
+    function _takeReservation() private returns (uint256 reserved) {
+        reserved = PENDING_FEE_SLOT.asUint256().tload();
+        PENDING_FEE_SLOT.asUint256().tstore(0);
+    }
+
+    /// @dev Returns the unused part of a reservation to the locker as a credit on its vault delta, never as a loose
+    ///      ERC20 balance of the locker contract (audit 2026-11-07, R-3): a router that resolves its deltas (Pancake's
+    ///      Universal Router, `SETTLE_ALL` / `TAKE_ALL`) then pays less or takes more by exactly the refund, so the
+    ///      trader gets it. The hook takes the refund to itself, hands it straight back to the vault and settles it
+    ///      for the locker; the credit the pool manager books for the hook when the callback returns covers the take.
+    ///      Only partial fills (a caller's price limit) reach this.
+    function _refund(Currency asset, address locker, uint256 amount) private {
+        vault.take(asset, address(this), amount);
+        vault.sync(asset);
+        IERC20(Currency.unwrap(asset)).safeTransfer(address(vault), amount);
+        vault.settleFor(locker);
     }
 
     function beforeDonate(address, PoolKey calldata, uint256, uint256, bytes calldata)
@@ -468,14 +485,14 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
     }
 
     /// @dev The token's fee rates are read once, before the swap, and kept for the callback after it in one
-    ///      transient word per token and locker: platform, buy and sell rates (16 bits each).
-    function _storeTerms(address token, address locker, IPikaLaunchToken.SwapTerms memory t) private {
+    ///      transient word: platform, buy and sell rates (16 bits each).
+    function _storeTerms(IPikaLaunchToken.SwapTerms memory t) private {
         uint256 word = uint256(t.platformFeeBps) | (uint256(t.buyFeeBps) << 16) | (uint256(t.sellFeeBps) << 32);
-        _slot(TERMS_TAG, token, locker).asUint256().tstore(word);
+        TERMS_SLOT.asUint256().tstore(word);
     }
 
-    function _loadTerms(address token, address locker) private view returns (Terms memory t) {
-        uint256 word = _slot(TERMS_TAG, token, locker).asUint256().tload();
+    function _loadTerms() private view returns (Terms memory t) {
+        uint256 word = TERMS_SLOT.asUint256().tload();
         t.platformBps = word & 0xffff;
         t.buyBps = (word >> 16) & 0xffff;
         t.sellBps = (word >> 32) & 0xffff;
@@ -485,10 +502,5 @@ contract PikaHook is ICLHooks, PikaFactoryBound, IPikaHook {
         address token = poolToken[key.toId()];
         if (token == address(0)) revert UnknownPool();
         t = IPikaLaunchToken(token);
-    }
-
-    /// @dev Transient state is scoped to the token and to the locker holding the vault lock.
-    function _slot(bytes32 tag, address token, address locker) private pure returns (bytes32) {
-        return keccak256(abi.encode(tag, token, locker));
     }
 }

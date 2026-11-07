@@ -177,6 +177,11 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
 
     function poolKey() public view returns (PoolKey memory) {
         (address base, address quote) = _assets();
+        return _key(base, quote);
+    }
+
+    /// @dev The launch pool's key for the clone's two assets (read once per entry, O-4).
+    function _key(address base, address quote) private view returns (PoolKey memory) {
         (address c0, address c1) = base < quote ? (base, quote) : (quote, base);
         return PoolKey({
             currency0: Currency.wrap(c0),
@@ -307,15 +312,18 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
         // Bounded above.
         // forge-lint: disable-next-line(unsafe-typecast)
         created.input = uint128(amount);
-        _deposit(created, orderId, amount);
-        (uint160 spot, bool unlocked) = _spot();
-        if (unlocked && _singleSided(zeroForOne, spot, tickLower, tickUpper)) _activate(orderId, created);
+        (address base, address quote) = _assets();
+        _deposit(created, orderId, amount, base, quote);
+        PoolKey memory key = _key(base, quote);
+        (uint160 spot, bool unlocked) = _spot(key);
+        if (unlocked && _singleSided(zeroForOne, spot, tickLower, tickUpper)) _activate(orderId, created, key);
     }
 
     /// @dev Pulls the order's input. A buy deposits quote: the platform fee's reserve is set aside from it and the
     ///      rest works in the range.
-    function _deposit(StoredOrder storage created, uint256 orderId, uint256 amount) private {
-        (address base, address quote) = _assets();
+    function _deposit(StoredOrder storage created, uint256 orderId, uint256 amount, address base, address quote)
+        private
+    {
         bool sell = created.zeroForOne == (base < quote);
         IERC20 input = IERC20(sell ? base : quote);
         uint256 reserve;
@@ -335,17 +343,18 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
     function activate(uint256 orderId) external nonReentrant returns (uint128 liquidity) {
         StoredOrder storage order = stored[orderId];
         if (order.status != Status.Funding) revert InvalidState();
-        (uint160 spot, bool unlocked) = _spot();
+        PoolKey memory key = poolKey();
+        (uint160 spot, bool unlocked) = _spot(key);
         if (!unlocked || !_singleSided(order.zeroForOne, spot, order.tickLower, order.tickUpper)) {
             revert NotSingleSided();
         }
-        return _activate(orderId, order);
+        return _activate(orderId, order, key);
     }
 
     function canActivate(uint256 orderId) external view returns (bool) {
         StoredOrder storage order = stored[orderId];
         if (order.status != Status.Funding) return false;
-        (uint160 spot, bool unlocked) = _spot();
+        (uint160 spot, bool unlocked) = _spot(poolKey());
         return unlocked && _singleSided(order.zeroForOne, spot, order.tickLower, order.tickUpper);
     }
 
@@ -354,7 +363,10 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
         return zeroForOne ? spot <= TickMath.getSqrtRatioAtTick(tickLower) : spot >= TickMath.getSqrtRatioAtTick(tickUpper);
     }
 
-    function _activate(uint256 orderId, StoredOrder storage order) private returns (uint128 liquidity) {
+    function _activate(uint256 orderId, StoredOrder storage order, PoolKey memory key)
+        private
+        returns (uint128 liquidity)
+    {
         order.status = Status.Active;
         bool zeroForOne = order.zeroForOne;
         uint256 totalInput = uint256(order.input) - order.reserve;
@@ -365,7 +377,7 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
             ? LiquidityAmounts.getLiquidityForAmount0(lower, upper, totalInput)
             : LiquidityAmounts.getLiquidityForAmount1(lower, upper, totalInput);
         if (liquidity == 0) revert InvalidMint();
-        BalanceDelta delta = _modify(orderId, order, int256(uint256(liquidity)));
+        BalanceDelta delta = _modify(orderId, order, int256(uint256(liquidity)), key);
         if (delta.amount0() > 0 || delta.amount1() > 0) revert InvalidMint();
         uint256 used0 = delta.amount0().negative();
         uint256 used1 = delta.amount1().negative();
@@ -461,7 +473,7 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
     {
         if (order.status != Status.Active) revert InvalidState();
         bool zeroForOne = order.zeroForOne;
-        BalanceDelta delta = _modify(orderId, order, -int256(uint256(order.liquidityOrFeeBasis)));
+        BalanceDelta delta = _modify(orderId, order, -int256(uint256(order.liquidityOrFeeBasis)), poolKey());
         amount0 = delta.amount0().positive();
         amount1 = delta.amount1().positive();
         if (requireFullFill && (zeroForOne ? amount0 : amount1) != 0) revert NotFullyFilled();
@@ -538,28 +550,29 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
     // -------------------------------------------------------------------------------------------------------------
 
     /// @dev The pool's sqrt price and whether the vault is free to open or close positions right now.
-    function _spot() private view returns (uint160 spot, bool unlocked) {
-        (spot,,,) = poolManager.getSlot0(poolId());
+    function _spot(PoolKey memory key) private view returns (uint160 spot, bool unlocked) {
+        (spot,,,) = poolManager.getSlot0(key.toId());
         unlocked = vault.getLocker() == address(0);
     }
 
-    /// @dev Runs one position change inside the vault lock and returns the position's balance delta.
-    function _modify(uint256 orderId, StoredOrder storage order, int256 liquidityDelta)
+    /// @dev Runs one position change inside the vault lock and returns the position's balance delta. The key travels
+    ///      in the lock data, so the callback does not read the clone's arguments again.
+    function _modify(uint256 orderId, StoredOrder storage order, int256 liquidityDelta, PoolKey memory key)
         private
         returns (BalanceDelta delta)
     {
         delta = abi.decode(
-            vault.lock(abi.encode(orderId, order.tickLower, order.tickUpper, liquidityDelta)), (BalanceDelta)
+            vault.lock(abi.encode(orderId, order.tickLower, order.tickUpper, liquidityDelta, key)), (BalanceDelta)
         );
     }
 
     /// @dev Opening settles the input from this contract's balance; closing takes the principal here. Nothing is
-    ///      ever kept as a vault delta.
+    ///      ever kept as a vault delta. Only this contract's own `lock` calls reach here (the vault calls back its
+    ///      locker), so the key in the data is this contract's own.
     function lockAcquired(bytes calldata data) external returns (bytes memory) {
         if (msg.sender != address(vault)) revert NotVault();
-        (uint256 orderId, int24 lower, int24 upper, int256 liquidityDelta) =
-            abi.decode(data, (uint256, int24, int24, int256));
-        PoolKey memory key = poolKey();
+        (uint256 orderId, int24 lower, int24 upper, int256 liquidityDelta, PoolKey memory key) =
+            abi.decode(data, (uint256, int24, int24, int256, PoolKey));
         (BalanceDelta delta,) = poolManager.modifyLiquidity(
             key,
             ICLPoolManager.ModifyLiquidityParams({

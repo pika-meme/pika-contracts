@@ -5,11 +5,14 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { IVault } from "infinity-core/src/interfaces/IVault.sol";
+import { IHooks } from "infinity-core/src/interfaces/IHooks.sol";
+import { IPoolManager } from "infinity-core/src/interfaces/IPoolManager.sol";
 import { ICLPoolManager } from "infinity-core/src/pool-cl/interfaces/ICLPoolManager.sol";
 import { PoolKey } from "infinity-core/src/types/PoolKey.sol";
 import { PoolId } from "infinity-core/src/types/PoolId.sol";
 import { Currency } from "infinity-core/src/types/Currency.sol";
 import { OpenFourToken } from "../openfour/token/OpenFourToken.sol";
+import { ERC20 } from "../openfour/oz/ERC20.sol";
 import { IPikaHook, IPikaOrderBook, IPikaLaunchToken } from "../pika-market/interfaces/IPikaMarket.sol";
 import { IPikaRouterContext, IPikaHub, PikaTokenParams } from "./interfaces/IPikaLaunch.sol";
 import { FeeSlot, IPikaApp, IPikaHolderBook } from "../pika-apps/interfaces/IPikaApps.sol";
@@ -62,8 +65,6 @@ contract PikaToken is OpenFourToken {
 
     /// @notice The launch hub: registers the launch, graduates it and is the only account that opens its pool.
     address public immutable factory;
-    /// @notice The platform treasury, which takes the platform share of every outer fee.
-    address public immutable treasury;
     IVault public immutable canonicalVault;
     ICLPoolManager public immutable poolManager;
 
@@ -95,6 +96,13 @@ contract PikaToken is OpenFourToken {
     address private _holderBook;
     /// @notice The launch's order manager, created with the pool at graduation.
     address public orderManager;
+    /// @notice The address the creator fee wallet proposed as its successor; zero when none is pending.
+    address public pendingCreatorFeeRecipient;
+    /// @dev The launch pool's parameters (the hook's callbacks and tick spacing), copied from the hook at creation so
+    ///      `poolKey` needs no call (O-3). The hook registers the pool under the same key at graduation.
+    bytes32 private _poolParameters;
+    /// @dev `keccak256(name())`, fixed at creation, for the EIP-712 domain (O-2).
+    bytes32 private _nameHash;
 
     /// @dev The launch's own addresses that are not immutables: its outer components, OpenFour's vault and modules,
     ///      the order manager and the fee slots. One read answers `isPlatformAccount` for any of them.
@@ -135,6 +143,10 @@ contract PikaToken is OpenFourToken {
     /// @notice The push before a creator claim failed and was undone; the claim stood.
     event AutoPushFailed();
     event CreatorFeesClaimed(address indexed to, uint256 memeAmount, uint256 quoteAmount);
+    /// @notice The creator fee wallet named `proposed` as its successor (zero withdraws a proposal).
+    event CreatorFeeRecipientProposed(address indexed current, address indexed proposed);
+    /// @notice The creator fee wallet changed: `current` accepted the proposal and claims from now on.
+    event CreatorFeeRecipientChanged(address indexed previous, address indexed current);
 
     constructor(address factory_, IVault vault_, ICLPoolManager poolManager_) {
         if (
@@ -142,7 +154,6 @@ contract PikaToken is OpenFourToken {
                 || address(poolManager_.vault()) != address(vault_)
         ) revert InvalidConfiguration();
         factory = factory_;
-        treasury = IPikaHub(factory_).treasury();
         canonicalVault = vault_;
         poolManager = poolManager_;
     }
@@ -157,6 +168,7 @@ contract PikaToken is OpenFourToken {
     function initialize(InitArgs calldata c) external override initializer {
         _initPika(c);
         __OpenFourToken_init(c);
+        _nameHash = keccak256(bytes(c.name));
     }
 
     function _initPika(InitArgs calldata c) private {
@@ -164,9 +176,10 @@ contract PikaToken is OpenFourToken {
             revert InvalidConfiguration();
         }
         PikaTokenParams memory p = abi.decode(c.tokenParams, (PikaTokenParams));
+        // The fee wallet defaults to the creator (audit 2026-11-07, U-6); the hub and the apps see the resolved one.
+        if (p.creatorFeeRecipient == address(0)) p.creatorFeeRecipient = c.creator;
         if (
-            p.creatorFeeRecipient == address(0) || p.creatorFeeRecipient == address(this)
-                || PLATFORM_FEE_BPS + p.buyFeeBps > MAX_TOTAL_FEE_BPS
+            p.creatorFeeRecipient == address(this) || PLATFORM_FEE_BPS + p.buyFeeBps > MAX_TOTAL_FEE_BPS
                 || PLATFORM_FEE_BPS + p.sellFeeBps > MAX_TOTAL_FEE_BPS
         ) revert InvalidConfiguration();
         // The apps read the quote while registering.
@@ -176,10 +189,11 @@ contract PikaToken is OpenFourToken {
                 IPikaHub.Registration({ creator: c.creator, quoteAsset: c.quoteAsset, supply: c.maxSupply, params: p })
             );
         if (
-            s.treasury != treasury || s.router.code.length == 0 || s.positionManager.code.length == 0
-                || s.hook.code.length == 0 || address(IPikaHook(s.hook).vault()) != address(canonicalVault)
+            s.router.code.length == 0 || s.positionManager.code.length == 0 || s.hook.code.length == 0
+                || address(IPikaHook(s.hook).vault()) != address(canonicalVault)
         ) revert InvalidConfiguration();
         _hook = s.hook;
+        _poolParameters = IPikaHook(s.hook).poolParameters();
         _buyFeeBps = p.buyFeeBps;
         _sellFeeBps = p.sellFeeBps;
         _router = s.router;
@@ -238,6 +252,13 @@ contract PikaToken is OpenFourToken {
         return IPikaHook(_hook);
     }
 
+    /// @notice The platform treasury, which takes the platform share of every outer fee: the hub's current one, so the
+    ///         owner's replacement (`PikaLaunchFactory.proposeTreasury` / `acceptTreasury`) reaches every launch
+    ///         (audit 2026-11-07, U-6).
+    function treasury() public view returns (address) {
+        return IPikaHub(factory).treasury();
+    }
+
     function tradingRouter() external view returns (address) {
         return _router;
     }
@@ -271,9 +292,18 @@ contract PikaToken is OpenFourToken {
     }
 
     /// @notice The launch's Infinity pool key: the hook's key for this token and its quote, the one the hook
-    ///         registers at graduation.
-    function poolKey() public view returns (PoolKey memory) {
-        return IPikaHook(_hook).buildPoolKey(address(this), _quote);
+    ///         registers at graduation (`buildPoolKey`), built here from the parameters copied at creation.
+    function poolKey() public view returns (PoolKey memory key) {
+        address q = _quote;
+        (address c0, address c1) = address(this) < q ? (address(this), q) : (q, address(this));
+        key = PoolKey({
+            currency0: Currency.wrap(c0),
+            currency1: Currency.wrap(c1),
+            hooks: IHooks(_hook),
+            poolManager: IPoolManager(address(poolManager)),
+            fee: POOL_FEE,
+            parameters: _poolParameters
+        });
     }
 
     function poolId() public view returns (PoolId) {
@@ -406,6 +436,26 @@ contract PikaToken is OpenFourToken {
         emit CreatorFeesClaimed(to, memeAmount, quoteAmount);
     }
 
+    /// @notice The creator fee wallet names its successor, which takes over when it accepts (two steps, so a typo
+    ///         cannot strand the fees); zero withdraws a pending proposal. Only the current wallet may call this
+    ///         (audit 2026-11-07, U-6: the wallet used to be fixed for the launch's life).
+    function proposeCreatorFeeRecipient(address next) external {
+        if (msg.sender != _creatorFeeRecipient) revert UnauthorizedComponent();
+        // Not the token itself and none of the launch's own accounts, which never hold a wallet's share.
+        if (next == address(this) || own[next] || next == address(canonicalVault)) revert InvalidConfiguration();
+        pendingCreatorFeeRecipient = next;
+        emit CreatorFeeRecipientProposed(msg.sender, next);
+    }
+
+    /// @notice The proposed wallet takes over: it claims every creator fee from now on, the accrued ones included.
+    function acceptCreatorFeeRecipient() external {
+        address next = pendingCreatorFeeRecipient;
+        if (next == address(0) || msg.sender != next) revert UnauthorizedComponent();
+        emit CreatorFeeRecipientChanged(_creatorFeeRecipient, next);
+        _creatorFeeRecipient = next;
+        pendingCreatorFeeRecipient = address(0);
+    }
+
     /// @notice A filled sell order's fee (platform plus project), paid by the order manager in quote by allowance to
     ///         this token, on the `quoteBought` the order returned; at most `maxFee`.
     function chargeSellFee(address account, uint256 quoteBought, uint256 maxFee) external returns (uint256 fee) {
@@ -500,7 +550,7 @@ contract PikaToken is OpenFourToken {
         if (platform == 0 && cut == 0 && project == 0) return false;
         if (platform != 0) stored.platform = 1;
         if (cut != 0 || project != 0) (stored.cut, stored.project) = (1, 1);
-        if (platform + cut != 0) _pay(asset, treasury, platform + cut, q);
+        if (platform + cut != 0) _pay(asset, treasury(), platform + cut, q);
         if (project != 0) {
             uint256 left = project;
             uint256 n = slots.length;
@@ -527,21 +577,45 @@ contract PikaToken is OpenFourToken {
     // Transfers: plain ERC20 moves, reported to the holder book
     // ---------------------------------------------------------------------------------------------------------
 
+    /// @dev OpenFour's standard token refuses transfers to or from a listed pool before migration
+    ///      (`_blocksBeforeMigration`). Pika has no venue lock and its migrate module never lists a pool, so that
+    ///      check could never fire; skipping it saves its three storage reads (the phase and both `migratedPools`
+    ///      entries) on every transfer (review 2026-11-07c, O-1). The phase and `migratedPools` themselves stay as
+    ///      OpenFour's getters.
+    function _beforeTokenTransfer(address from, address to, uint256 amount) internal override {
+        ERC20._beforeTokenTransfer(from, to, amount);
+    }
+
     /// @dev Balances and dividend shares stand or fall together (user decision, following Flap, 2026-11-03): a book
     ///      that reverts reverts the transfer too. The token only reports both parties and their balances; every
-    ///      rule about who earns lives in the book.
+    ///      rule about who earns lives in the book. The launch's own accounts (`_isOwn`) never hold shares, so the
+    ///      token reports a zero balance for them and skips the call when both parties are its own: the book then
+    ///      needs no `isPlatformAccount` call on the hot path (audit 2026-11-07, O-1). The treasury is not among
+    ///      them here (it is the hub's and may change); the book asks for it, which only happens on a push.
     function _afterTokenTransfer(address from, address to, uint256 amount) internal override {
         super._afterTokenTransfer(from, to, amount);
         address book = _holderBook;
         if (book == address(0)) return;
-        IPikaHolderBook(book).setShares(from, balanceOf(from), to, balanceOf(to));
+        bool fromOwn = _isOwn(from);
+        bool toOwn = _isOwn(to);
+        if (fromOwn && toOwn) return;
+        IPikaHolderBook(book).setShares(from, fromOwn ? 0 : balanceOf(from), to, toOwn ? 0 : balanceOf(to));
+    }
+
+    /// @dev The launch's own accounts, fixed for its life: the zero and burn addresses, the Infinity vault, the token
+    ///      itself, the hub, the outer components, OpenFour's vault and modules, the app slots and the order manager.
+    function _isOwn(address account) private view returns (bool) {
+        return account == address(0) || account == DEAD || account == address(canonicalVault)
+            || account == address(this) || account == factory || own[account];
     }
 
     /// @notice Whether `account` is one of the launch's platform accounts: the zero and burn addresses, the Infinity
     ///         vault, the hub and treasury, the outer components, OpenFour's vault and modules and the app slots.
+    /// @dev The treasury is the hub's current one, read last so the launch's own accounts never pay for the call. A
+    ///      treasury change does not move dividend shares by itself: the book rereads an account's balance on its
+    ///      next transfer or on anyone's `refresh`.
     function isPlatformAccount(address account) external view returns (bool) {
-        return account == address(0) || account == DEAD || account == address(canonicalVault)
-            || account == address(this) || account == treasury || account == factory || own[account];
+        return _isOwn(account) || account == treasury();
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -551,9 +625,7 @@ contract PikaToken is OpenFourToken {
     // forge-lint: disable-next-line(mixed-case-function)
     function DOMAIN_SEPARATOR() public view returns (bytes32) {
         return keccak256(
-            abi.encode(
-                DOMAIN_TYPEHASH, keccak256(bytes(name())), keccak256(bytes(PERMIT_VERSION)), block.chainid, address(this)
-            )
+            abi.encode(DOMAIN_TYPEHASH, _nameHash, keccak256(bytes(PERMIT_VERSION)), block.chainid, address(this))
         );
     }
 

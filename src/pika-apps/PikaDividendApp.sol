@@ -16,10 +16,11 @@ import { IPikaHolderBook, IPikaAppToken, IPikaAppFactory, IPikaAppRegistry } fro
 ///      the launch's minimum holding hold none until their balance reaches it again; and the accounts the registry's
 ///      owner (the timelock) lists per launch (`setExcluded`, for third-party pools and other contracts whose balance
 ///      belongs to their users, following Flap's `excludeAddress`) hold none. The token no longer probes contracts
-///      for pool-like interfaces. Excluding an account settles what it earned: a plain wallet is paid it at once, a
-///      contract's share goes back to the launch's unreleased fees for the other holders (version 12; a pool cannot
-///      claim, so paying it would strand or leak the money); a list entry cannot be a platform account, and the owner
-///      may remove it again, which rereads the account's balance. Token transfers require their share update to
+///      for pool-like interfaces. Excluding an account settles what it earned: a plain wallet is paid it at once; a
+///      contract keeps it on its books to claim itself (a contract wallet can, a pool cannot), and the owner may
+///      return a contract's unclaimed earnings to the other holders only after `RECLAIM_DELAY` (version 13: nothing
+///      is confiscated at listing time, audit 2026-11-07 R-4); a list entry cannot be a platform account, and the
+///      owner may remove it again, which rereads the account's balance. Token transfers require their share update to
 ///      succeed. `refresh` rereads a holder's balance and applies the same rules, so a record can always be made to
 ///      agree with them.
 ///
@@ -29,12 +30,13 @@ import { IPikaHolderBook, IPikaAppToken, IPikaAppFactory, IPikaAppRegistry } fro
 ///      L-1). Instead each booking adds its amount to what is still unreleased in that asset and restarts the release
 ///      over `RELEASE_WINDOW` from now; what is released is spread over the shares held at that time, as a running
 ///      "reward per share" (scaled by 2^128). A holder earns for exactly the seconds it holds, so a buy just before
-///      a push earns only the seconds' worth it stays. While nobody holds shares the release waits: the window moves
-///      on by the time nobody held. Rounding stays unreleased and goes out later. A holder's owed amount is settled
+///      a push earns only the seconds' worth it stays. A booking smaller than what is still unreleased joins the
+///      release in progress instead of restarting the window (version 12). While nobody holds shares the release
+///      waits: the window moves on by the time nobody held. Rounding stays unreleased and goes out later. A holder's owed amount is settled
 ///      whenever its shares change and when it claims. Releasing is constant work and runs inside transfers.
 contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
     bytes32 public constant KEY = "dividend";
-    uint16 public constant VERSION = 12;
+    uint16 public constant VERSION = 14;
     /// @notice The highest minimum holding a launch may set, as a share of its supply: 10%. The spread of ordinary
     ///         holdings puts a threshold near the supply out of everyone's reach, and fees sent to a book nobody can
     ///         join are stuck (audit 2026-10-31 M-3). Applies to launches created after this version; earlier
@@ -45,6 +47,9 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
     /// @notice A booking's fees, with what is still unreleased in that asset, are released evenly over this window.
     ///         It is longer than the keeper's push interval, so a known push cannot be sniped by a short hold.
     uint256 public constant RELEASE_WINDOW = 1 days;
+    /// @notice How long an excluded contract keeps its unclaimed earnings before the owner may return them to the
+    ///         other holders (`reclaimUnclaimed`): long enough for a listed contract wallet to claim them itself.
+    uint256 public constant RECLAIM_DELAY = 180 days;
     uint256 private constant SCALE = 2 ** 128;
     address private constant BURN = 0x000000000000000000000000000000000000dEaD;
 
@@ -86,17 +91,23 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
     mapping(address token => mapping(address account => bool)) public excluded;
     /// @dev Appended in template version 11.
     mapping(address token => Launch) private launches;
+    /// @notice When the owner listed an account, per launch; zero when it is not listed. Appended in version 13.
+    mapping(address token => mapping(address account => uint64)) public excludedAt;
 
     error TooManyHolders();
 
     /// @dev `amount` is in the launch token, `quoteAmount` in its quote asset.
     event DividendClaimed(address indexed token, address indexed holder, uint256 amount, uint256 quoteAmount);
-    /// @notice The owner added `account` to (or removed it from) the launch's exclusion list. On an exclusion,
-    ///         `amount` of the launch token and `quoteAmount` of quote it had earned went back to the unreleased fees;
-    ///         both are zero for a wallet, which is paid its earnings instead (`DividendClaimed`).
+    /// @notice The owner added `account` to (or removed it from) the launch's exclusion list. On an exclusion of a
+    ///         contract, `amount` of the launch token and `quoteAmount` of quote are what it had earned and keeps on its
+    ///         books to claim; both are zero for a wallet, which is paid its earnings instead (`DividendClaimed`).
     event AccountExcluded(
         address indexed token, address indexed account, bool excluded, uint256 amount, uint256 quoteAmount
     );
+
+    /// @notice The owner returned an excluded contract's unclaimed earnings to the launch's unreleased fees, after
+    ///         `RECLAIM_DELAY`.
+    event UnclaimedReclaimed(address indexed token, address indexed account, uint256 amount, uint256 quoteAmount);
 
     constructor(address registry_) PikaAppBase(registry_) { }
 
@@ -167,14 +178,18 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
     // Booking and release
     // ---------------------------------------------------------------------------------------------------------
 
-    /// @dev Releases what is due up to now, then adds `amount` to the unreleased rest and restarts the window.
+    /// @dev Releases what is due up to now, then adds `amount` to the unreleased rest. A booking at least as large as
+    ///      that rest restarts the window (so a push cannot be sniped by a short hold); a smaller one joins the
+    ///      release in progress and goes out over its remaining time, so dust bookings cannot keep stretching the
+    ///      whole pile (audit 2026-11-07, U-3).
     function _book(address token, address asset, uint256 amount) internal override {
         Book storage b = books[token][asset];
         _release(b, totalShares[token]);
+        uint256 rest = b.unreleased;
         // A rejected booking reverts the token's whole push, including its payment and cleared fee snapshot.
-        b.unreleased = SafeCast.toUint128(uint256(b.unreleased) + amount);
+        b.unreleased = SafeCast.toUint128(rest + amount);
         b.updatedAt = uint64(block.timestamp);
-        b.endsAt = uint64(block.timestamp + RELEASE_WINDOW);
+        if (amount >= rest || b.endsAt <= block.timestamp) b.endsAt = uint64(block.timestamp + RELEASE_WINDOW);
     }
 
     /// @dev Moves what is due since the last release into the reward per share of `supply`. Runs before any share
@@ -243,7 +258,7 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
         returns (uint256 next, bool changes)
     {
         uint256 old = shares[token][account];
-        next = _effective(token, account, balance, min, old);
+        next = _effective(token, account, balance, min);
         changes = next != old;
     }
 
@@ -259,23 +274,15 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
 
     /// @dev The shares every rule gives `holder` for its balance right now.
     function _reported(address token, address holder) private view returns (uint256) {
-        return _effective(token, holder, IPikaAppToken(token).balanceOf(holder), minHolding(token), 0);
+        return _effective(token, holder, IPikaAppToken(token).balanceOf(holder), minHolding(token));
     }
 
     /// @dev The shares a balance is worth: nothing for an empty or too small balance; otherwise the balance, except
     ///      for this sink, the burn address, a listed account or one of the launch's platform accounts (one read of
-    ///      the token, skipped when the cheaper checks already answer). A holder that already has shares (`recorded`)
-    ///      passed those identity checks when it got them and still does: the token fixes its platform accounts
-    ///      before the supply exists and has the book `refresh` the one it adds later (the order manager), and
-    ///      listing an account zeroes its shares at once. So a holder's balance changes skip them, which is most of
-    ///      the work of an ordinary transfer.
-    function _effective(address token, address account, uint256 balance, uint256 min, uint256 recorded)
-        private
-        view
-        returns (uint256)
-    {
+    ///      the token, skipped when the cheaper checks already answer). Platform identity is dynamic: a holder may
+    ///      become the hub's treasury. Existing shares therefore never bypass the identity checks.
+    function _effective(address token, address account, uint256 balance, uint256 min) private view returns (uint256) {
         if (balance == 0 || balance < min) return 0;
-        if (recorded != 0) return balance;
         if (account == address(this) || account == BURN || excluded[token][account]) return 0;
         if (_platform(token, account)) return 0;
         return balance;
@@ -293,16 +300,18 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
     /// @notice Add `account` to, or remove it from, the launch's exclusion list. Only the registry's owner (the
     ///         timelock). Platform accounts are excluded by rule and cannot be listed. Excluding zeroes the account's
     ///         shares and settles what it earned so far in both assets: an account without code (a wallet) is paid it
-    ///         at once, like a claim (`DividendClaimed`), since the list only stops its future earnings; a contract's
-    ///         earnings return to the launch's unreleased fees (released over `RELEASE_WINDOW` like a booking, so the
-    ///         moment cannot be sniped), since a pool cannot claim and whatever is sent to it is lost to its users or
-    ///         skimmed (audit 2026-11-07, U-2). Removing an entry rereads the account's balance, so it earns again
-    ///         from now on.
+    ///         at once, like a claim (`DividendClaimed`), since the list only stops its future earnings; a contract
+    ///         keeps it on its books, where it can `claim` like anyone (a contract wallet) or leave it (a pool, which
+    ///         cannot claim, and which must not be paid: whatever reaches it is skimmed or lost to its users). Nothing is
+    ///         taken from a listed account (audit 2026-11-07, R-4); what a contract never claims goes back to the other
+    ///         holders through `reclaimUnclaimed` after `RECLAIM_DELAY`. Removing an entry rereads the account's
+    ///         balance, so it earns again from now on.
     function setExcluded(address token, address account, bool excluded_) external nonReentrant {
         if (msg.sender != IPikaAppRegistry(registry).owner()) revert Unauthorized();
         (address quote,) = _launch(token);
         if (excluded[token][account] == excluded_ || _platform(token, account)) revert InvalidParams();
         excluded[token][account] = excluded_;
+        excludedAt[token][account] = excluded_ ? uint64(block.timestamp) : 0;
         _releaseBoth(token, quote);
         uint256 amount;
         uint256 quoteAmount;
@@ -311,18 +320,38 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
             if (account.code.length == 0) {
                 _claim(token, quote, account, account);
             } else {
-                Account storage m = accounts[token][token][account];
-                Account storage q = accounts[token][quote][account];
-                (amount, quoteAmount) = (m.owed, q.owed);
-                m.owed = 0;
-                q.owed = 0;
-                if (amount != 0) _book(token, token, amount);
-                if (quoteAmount != 0) _book(token, quote, quoteAmount);
+                (amount, quoteAmount) = (accounts[token][token][account].owed, accounts[token][quote][account].owed);
             }
         } else {
             _set(token, quote, account, _reported(token, account));
         }
         emit AccountExcluded(token, account, excluded_, amount, quoteAmount);
+    }
+
+    /// @notice Return what an excluded contract earned and never claimed to the launch's unreleased fees, for the
+    ///         other holders. Only the registry's owner, only for a listed account with code, and only once the account
+    ///         has been listed for `RECLAIM_DELAY`: a listed contract wallet has that long to claim its earnings itself.
+    ///         The returned amounts release over `RELEASE_WINDOW` like a booking, so the moment cannot be sniped.
+    function reclaimUnclaimed(address token, address account)
+        external
+        nonReentrant
+        returns (uint256 amount, uint256 quoteAmount)
+    {
+        if (msg.sender != IPikaAppRegistry(registry).owner()) revert Unauthorized();
+        (address quote,) = _launch(token);
+        uint64 since = excludedAt[token][account];
+        if (!excluded[token][account] || account.code.length == 0 || since == 0) revert InvalidParams();
+        if (block.timestamp < uint256(since) + RECLAIM_DELAY) revert InvalidParams();
+        _releaseBoth(token, quote);
+        // An excluded account holds no shares, so its owed amounts are final.
+        Account storage m = accounts[token][token][account];
+        Account storage q = accounts[token][quote][account];
+        (amount, quoteAmount) = (m.owed, q.owed);
+        m.owed = 0;
+        q.owed = 0;
+        if (amount != 0) _book(token, token, amount);
+        if (quoteAmount != 0) _book(token, quote, quoteAmount);
+        emit UnclaimedReclaimed(token, account, amount, quoteAmount);
     }
 
     /// @dev Settles what the old shares earned in both assets, then records the new shares. Releases ran before.
@@ -354,7 +383,9 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
         nonReentrant
         returns (uint256 amount, uint256 quoteAmount)
     {
-        if (recipient == address(0) || recipient == address(this)) revert InvalidParams();
+        if (recipient == address(0) || recipient == address(this)) {
+            revert InvalidParams();
+        }
         (address quote,) = _launch(token);
         _releaseBoth(token, quote);
         return _claim(token, quote, msg.sender, recipient);
@@ -379,7 +410,11 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
         private
         returns (uint256 amount, uint256 quoteAmount)
     {
-        uint256 s = shares[token][holder];
+        // Preserve earnings accrued before this synchronization, then use the same eligibility rules as transfers.
+        // A treasury rotation must pre-exclude the incoming wallet on every affected launch before acceptance;
+        // a lazy refresh cannot reconstruct the time at which an old factory changed its treasury.
+        uint256 s = _reported(token, holder);
+        if (s != shares[token][holder]) _set(token, quote, holder, s);
         _settle(token, token, holder, s);
         _settle(token, quote, holder, s);
         amount = accounts[token][token][holder].owed;

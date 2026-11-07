@@ -301,12 +301,23 @@ contract PikaTradeLens is ILockCallback {
         uint256 output = kept + a.outHeld - b.outHeld;
         uint256 gross = kept + b.outVault - a.outVault;
         // A buy's platform fee left the vault for the token; on a partial fill the unused part of the hook's
-        // reservation came back here as ERC20 and is not spent.
+        // reservation is credited back on this contract's input delta (the hook settles it for the locker), so what
+        // is really spent is the net debt, not the swap's delta. Anything that arrived as ERC20 is not spent either.
         uint256 returned = a.inHeld - b.inHeld;
         uint256 inputFee = b.inVault - a.inVault - returned;
+        returned += _credited(sim, spent);
         (uint160 priceAfter,,,) = manager.getSlot0(sim.key.toId());
         // The lock always ends in this revert, which carries the result out.
         revert Simulated(spent - returned, gross, output, inputFee, priceAfter);
+    }
+
+    /// @dev The part of the swap's input debt the hook credited back on this contract's delta (a partial fill's unused
+    ///      reservation): the swap's delta less the net debt the vault records.
+    function _credited(Simulation memory sim, uint256 spent) private view returns (uint256) {
+        Currency input = sim.zeroForOne ? sim.key.currency0 : sim.key.currency1;
+        int256 netIn = IVault(msg.sender).currencyDelta(address(this), input);
+        uint256 owed = netIn < 0 ? uint256(-netIn) : 0;
+        return owed < spent ? spent - owed : 0;
     }
 
     /// @dev Both assets' balances of this contract and of the vault, around the simulated swap.

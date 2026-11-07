@@ -36,6 +36,8 @@ abstract contract PikaSinkBase is PikaAppBase {
 
     error NotKeeper();
     error BelowThreshold();
+    error MissingMinimumOutput();
+    error SwapPreview(uint256 output, uint160 sqrtPriceAfterX96);
 
     /// @dev `amount` is in the sink's own asset: the launch token for a buy, the quote asset for a sell.
     event Dispatched(address indexed token, bool sellMeme, uint256 amountIn, uint256 amountOut);
@@ -57,6 +59,38 @@ abstract contract PikaSinkBase is PikaAppBase {
     function poolPrice(address token) external view returns (uint160 sqrtPriceX96, bool memeIs0) {
         _requireRegistered(token);
         return _price(IPikaLaunchToken(token));
+    }
+
+    /// @notice Simulates the actual router swap, including pool depth and fees, without retaining any state change.
+    ///         Call with eth_call. The nested self-call always reverts; even an on-chain call cannot spend funds.
+    function previewSwap(address token, bool sellMeme, uint256 amountIn)
+        external
+        nonReentrant
+        returns (uint256 output, uint160 sqrtPriceAfterX96)
+    {
+        _requireRegistered(token);
+        address input = sellMeme ? token : _quote(token);
+        if (amountIn == 0 || amountIn > pending[token][input]) revert InvalidParams();
+        try this.simulateSwap(token, sellMeme, amountIn) {
+            revert InvalidParams();
+        } catch (bytes memory reason) {
+            if (reason.length == 68 && bytes4(reason) == SwapPreview.selector) {
+                assembly ("memory-safe") {
+                    output := mload(add(reason, 36))
+                    sqrtPriceAfterX96 := mload(add(reason, 68))
+                }
+                return (output, sqrtPriceAfterX96);
+            }
+            assembly ("memory-safe") { revert(add(reason, 32), mload(reason)) }
+        }
+    }
+
+    /// @dev Only `previewSwap` can reach this entry. Reverting rolls back approvals, transfers, pool state and fees.
+    function simulateSwap(address token, bool sellMeme, uint256 amountIn) external {
+        if (msg.sender != address(this)) revert Unauthorized();
+        (, uint256 output) = _swap(token, sellMeme, amountIn, 1, block.timestamp);
+        (uint160 price,) = _price(IPikaLaunchToken(token));
+        revert SwapPreview(output, price);
     }
 
     function _price(IPikaLaunchToken t) internal view returns (uint160 sqrtPriceX96, bool memeIs0) {
@@ -82,6 +116,7 @@ abstract contract PikaSinkBase is PikaAppBase {
         internal
         returns (uint256 spent, uint256 out)
     {
+        if (minOut == 0) revert MissingMinimumOutput();
         IPikaLaunchToken t = IPikaLaunchToken(token);
         if (!t.tradingStarted()) revert NotGraduated();
         address router = t.tradingRouter();

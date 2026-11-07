@@ -11,7 +11,7 @@ import { PikaSinkBase } from "./PikaSinkBase.sol";
 ///      part of that fee that comes back to this sink is burned with the rest.
 contract PikaBurnApp is PikaSinkBase {
     bytes32 public constant KEY = "burn";
-    uint16 public constant VERSION = 2;
+    uint16 public constant VERSION = 3;
     address public constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
 
     event Burned(address indexed token, uint256 amount);
@@ -41,11 +41,29 @@ contract PikaBurnApp is PikaSinkBase {
         nonReentrant
         returns (uint256 quoteSpent, uint256 memeReceived, uint256 burned)
     {
+        return _buyback(token, type(uint256).max, minOut, deadline);
+    }
+
+    /// @notice Process at most `maxQuote` of the booked quote; the rest waits for a later dispatch. The cap also
+    ///         keeps fees pushed after the keeper's quote from increasing the input of its prepared transaction.
+    function buybackLimited(address token, uint256 maxQuote, uint256 minOut, uint256 deadline)
+        external
+        nonReentrant
+        returns (uint256 quoteSpent, uint256 memeReceived, uint256 burned)
+    {
+        return _buyback(token, maxQuote, minOut, deadline);
+    }
+
+    function _buyback(address token, uint256 maxQuote, uint256 minOut, uint256 deadline)
+        private
+        returns (uint256 quoteSpent, uint256 memeReceived, uint256 burned)
+    {
         _requireActive();
         _requireKeeper();
         _requireRegistered(token);
         address quote = _quote(token);
         uint256 amount = pending[token][quote];
+        if (amount > maxQuote) amount = maxQuote;
         if (amount < _minDispatch(quote)) revert BelowThreshold();
         (quoteSpent, memeReceived) = _swap(token, false, amount, minOut, deadline);
         pending[token][quote] -= quoteSpent;
@@ -94,5 +112,25 @@ contract PikaBurnApp is PikaSinkBase {
         pending[token][token] = 0;
         _send(token, BURN_ADDRESS, amount);
         emit Burned(token, amount);
+    }
+
+    /// @notice Bounded buybacks, independently reverted on failure like `buybackMany`.
+    function buybackLimitedMany(
+        address[] calldata tokens,
+        uint256[] calldata maxima,
+        uint256[] calldata minOuts,
+        uint256 deadline
+    ) external returns (bool[] memory done) {
+        _requireActive();
+        _requireKeeper();
+        if (tokens.length != maxima.length || tokens.length != minOuts.length) revert InvalidParams();
+        done = new bool[](tokens.length);
+        for (uint256 i; i < tokens.length; ++i) {
+            try this.buybackLimited(tokens[i], maxima[i], minOuts[i], deadline) {
+                done[i] = true;
+            } catch (bytes memory reason) {
+                emit DispatchSkipped(tokens[i], reason);
+            }
+        }
     }
 }

@@ -19,7 +19,10 @@ import { PikaToken } from "./PikaToken.sol";
 import { PikaGraduationMath } from "./libraries/PikaGraduationMath.sol";
 import { PikaBurnedLiquidity } from "../common/libraries/PikaBurnedLiquidity.sol";
 import {
-    IPikaFactoryBound, IPikaHook, IPikaOrderDeployer, IPikaPositionManager
+    IPikaFactoryBound,
+    IPikaHook,
+    IPikaOrderDeployer,
+    IPikaPositionManager
 } from "../pika-market/interfaces/IPikaMarket.sol";
 import { IPikaHub, PikaTokenParams } from "./interfaces/IPikaLaunch.sol";
 import { FeeSlot, IPikaLaunchAppRegistry } from "../pika-apps/interfaces/IPikaApps.sol";
@@ -64,6 +67,10 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     ///         wallet claims it from the token with its other creator fees). The rest of the raise outside the pool
     ///         (and anything else the vault held) goes to the treasury.
     uint16 public constant CREATOR_GRADUATION_BPS = 100;
+    /// @notice Minimum supported supply. The standard vault closes with up to one whole token unsold. At the
+    ///         80/20 split the final marginal price is 4.9 * target / supply, so this bounds that dust's missing
+    ///         raise to less than 5 ppm of the target (apart from quote-unit rounding).
+    uint256 public constant MIN_SUPPLY = 1_000_000 ether;
     /// @notice The smallest minimum target `configureQuote` accepts, in the quote's smallest units.
     uint256 public constant MIN_TARGET_FLOOR = 1e15;
 
@@ -107,7 +114,12 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
 
     IVault public immutable vault;
     ICLPoolManager public immutable poolManager;
-    address public immutable treasury;
+    /// @notice The platform treasury: takes every platform fee and project-fee cut (the tokens read it from here at
+    ///         each push) and the graduation quote. The owner replaces it in two steps (`proposeTreasury`, then the
+    ///         new address's `acceptTreasury`), so a typo cannot send fees into a void (audit 2026-11-07, U-6).
+    address public treasury;
+    /// @notice The treasury the owner proposed; zero when none is pending.
+    address public pendingTreasury;
 
     /// @notice OpenFour Core for new launches: the Pika modules initialize only while the hub names their Core.
     address public core;
@@ -180,6 +192,10 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     );
     event TreasuryQuoteAccrued(address indexed token, address indexed asset, uint256 amount);
     event TreasuryQuoteClaimed(address indexed asset, address indexed treasury, uint256 amount);
+    /// @notice The owner named `proposed` as the next treasury (zero withdraws a proposal).
+    event TreasuryProposed(address indexed current, address indexed proposed);
+    /// @notice The treasury changed: `current` accepted and takes every platform fee from now on.
+    event TreasuryChanged(address indexed previous, address indexed current);
     event LaunchEnabled(bool enabled);
     event CoreUpdated(address indexed previousCore, address indexed newCore);
     event AppRegistryUpdated(address indexed previousRegistry, address indexed newRegistry);
@@ -223,6 +239,24 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
 
     function _admin() internal view override returns (address) {
         return owner();
+    }
+
+    /// @notice Name the next treasury (owner only, so it waits for the timelock); zero withdraws a pending proposal.
+    ///         It takes over once it calls `acceptTreasury`.
+    function proposeTreasury(address next) external onlyOwner {
+        if (next == address(this)) revert InvalidConfiguration();
+        pendingTreasury = next;
+        emit TreasuryProposed(treasury, next);
+    }
+
+    /// @notice The proposed treasury takes over: every launch's platform fees and the graduation quote go to it from
+    ///         now on, the amounts already owed (`pendingTreasuryQuote`, booked fees) included.
+    function acceptTreasury() external {
+        address next = pendingTreasury;
+        if (next == address(0) || msg.sender != next) revert Unauthorized();
+        emit TreasuryChanged(treasury, next);
+        treasury = next;
+        pendingTreasury = address(0);
     }
 
     /// @notice OpenFour Core for new launches; graduation trusts its records from now on. Earlier Cores stay trusted
@@ -307,7 +341,7 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
 
     /// @notice Total supply every new launch must mint. Existing launches keep theirs.
     function setDefaultSupply(uint256 supply) external onlyOwner {
-        if (supply < 1 ether || supply > 1e36) revert InvalidConfiguration();
+        if (supply < MIN_SUPPLY || supply > 1e36) revert InvalidConfiguration();
         emit DefaultSupplyUpdated(defaultSupply, supply);
         defaultSupply = supply;
     }
@@ -377,10 +411,10 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         _openingPrice(false, s.poolTokens, s.poolQuote);
         // The token's outer fee bounds, checked again here so a bad launch fails in Core's validation rather than
         // deep inside the token's initialization. The app registry bounds the app count.
+        // A zero fee wallet means the creator, which the token fills in (audit 2026-11-07, U-6).
         PikaTokenParams memory t = abi.decode(p.tokenParams, (PikaTokenParams));
         if (
-            t.creatorFeeRecipient == address(0)
-                || PikaFeeMath.PLATFORM_FEE_BPS + t.buyFeeBps > PikaFeeMath.MAX_TOTAL_FEE_BPS
+            PikaFeeMath.PLATFORM_FEE_BPS + t.buyFeeBps > PikaFeeMath.MAX_TOTAL_FEE_BPS
                 || PikaFeeMath.PLATFORM_FEE_BPS + t.sellFeeBps > PikaFeeMath.MAX_TOTAL_FEE_BPS
         ) revert InvalidConfiguration();
         IPikaLaunchAppRegistry(appRegistry).holderBookOf(t.apps);
@@ -398,11 +432,14 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         if (!tokenImplementations[_cloneImplementation(token)]) revert Unauthorized();
         if (launches[token].phase != Phase.None) revert WrongPhase();
         if (!quoteConfigs[r.quoteAsset].enabled) revert UnsupportedQuote();
+        // Core's `validate` fixed the supply in the same transaction; a clone initialized outside Core did not pass
+        // it, so the one value the hub owns is checked again here (audit 2026-11-07, R-6).
+        if (r.supply != defaultSupply) revert InvalidConfiguration();
         uint32 version = componentsVersion;
         Components memory comp = components[version];
         address recipient = r.params.creatorFeeRecipient;
         if (
-            recipient == token || recipient == r.quoteAsset || recipient == address(vault)
+            recipient == address(0) || recipient == token || recipient == r.quoteAsset || recipient == address(vault)
                 || recipient == address(poolManager) || recipient == appRegistry || recipient == address(this)
                 || recipient == comp.router || recipient == comp.orderDeployer || recipient == comp.hook
                 || recipient == comp.positionManager || recipient == core
@@ -416,14 +453,7 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         s.positionManager = comp.positionManager;
         launches[token] = Launch(r.quoteAsset, Phase.Internal, version);
         emit LaunchRegistered(
-            token,
-            r.creator,
-            r.quoteAsset,
-            version,
-            recipient,
-            r.params.buyFeeBps,
-            r.params.sellFeeBps,
-            s.holderBook
+            token, r.creator, r.quoteAsset, version, recipient, r.params.buyFeeBps, r.params.sellFeeBps, s.holderBook
         );
     }
 
@@ -446,7 +476,8 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         }
         // 363d3d373d3d3d363d73 <impl> 5af43d82803e903d91602b57fd5bf3
         if (
-            bytes10(head) != bytes10(0x363d3d373d3d3d363d73) || bytes15(tail) != bytes15(0x5af43d82803e903d91602b57fd5bf3)
+            bytes10(head) != bytes10(0x363d3d373d3d3d363d73)
+                || bytes15(tail) != bytes15(0x5af43d82803e903d91602b57fd5bf3)
         ) return address(0);
     }
 
@@ -473,8 +504,7 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         PikaToken token = PikaToken(tokenAddress);
         PoolKey memory key = _openPool(token, l.quoteToken, comp, poolTokens, quoteAmount * POOL_QUOTE_BPS / 10_000);
         poolId = PoolId.unwrap(key.toId());
-        uint128 liquidity =
-            _burnPosition(token, key, comp.positionManager, l.quoteToken, poolTokens, quoteAmount);
+        uint128 liquidity = _burnPosition(token, key, comp.positionManager, l.quoteToken, poolTokens, quoteAmount);
         token.openTrading();
         launches[tokenAddress].phase = Phase.External;
         emit PoolGraduated(tokenAddress, token.orderManager(), comp.router, liquidity, quoteAmount, swept);

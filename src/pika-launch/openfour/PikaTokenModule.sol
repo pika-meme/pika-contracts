@@ -74,7 +74,17 @@ contract PikaTokenModule is PikaModuleBase, IOpenFourTokenModule, IOpenFourModul
         ParamDescriptor[] memory p = new ParamDescriptor[](4);
         // The token's cap on the project fee per direction: the total cap less the platform fee.
         string memory maxFee = Strings.toString(PikaFeeMath.MAX_TOTAL_FEE_BPS - PikaFeeMath.PLATFORM_FEE_BPS);
-        p[0] = ParamDescriptor("creatorFeeRecipient", "address", 0, false, "Fee wallet", "", "", "", "");
+        p[0] = ParamDescriptor(
+            "creatorFeeRecipient",
+            "address",
+            0,
+            true,
+            "Fee wallet",
+            "0x0000000000000000000000000000000000000000",
+            "Zero: the creator. The wallet can hand the role over later.",
+            "",
+            ""
+        );
         p[1] = ParamDescriptor("buyFeeBps", "uint16", 0, true, "Buy project fee (bps)", "0", "", "0", maxFee);
         p[2] = ParamDescriptor("sellFeeBps", "uint16", 0, true, "Sell project fee (bps)", "0", "", "0", maxFee);
         p[3] = ParamDescriptor(

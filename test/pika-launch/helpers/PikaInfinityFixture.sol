@@ -142,8 +142,7 @@ abstract contract PikaInfinityFixture is PikaLpHelpers {
         wbnb = new MockWBNB();
         usdt = MockUSDT(_newWithAddress("MockUSDT", address(this)));
         guard = PikaGuard(_newWithAddress("PikaGuard", address(this)));
-        registry =
-            PikaAppRegistry(_deploy("PikaAppRegistry", abi.encode(address(this), address(guard), address(this))));
+        registry = PikaAppRegistry(_deploy("PikaAppRegistry", abi.encode(address(this), address(guard), address(this))));
         router = PikaRouter(payable(_newRouter(address(wbnb), address(vault), address(manager))));
         hook = PikaHook(_newWithVenue("PikaHook", address(vault), address(manager)));
         positionManager = IPikaPositionManager(_newPositionManager(address(vault), address(manager), address(wbnb)));
@@ -173,11 +172,13 @@ abstract contract PikaInfinityFixture is PikaLpHelpers {
         registry.addTemplate(address(appA), PikaAppRegistry.Kind.Contract, "appA", 2, false);
         registry.addTemplate(address(appB), PikaAppRegistry.Kind.Contract, "appB", 2, false);
         registry.addTemplate(address(appC), PikaAppRegistry.Kind.Contract, "appC", 2, false);
-        registry.addTemplate(address(burnApp), PikaAppRegistry.Kind.Contract, "burn", 2, true);
+        registry.addTemplate(address(burnApp), PikaAppRegistry.Kind.Contract, "burn", burnApp.version(), true);
         registry.addTemplate(
             address(dividendApp), PikaAppRegistry.Kind.HolderBook, "dividend", dividendApp.version(), true
         );
-        registry.addTemplate(address(liquidityApp), PikaAppRegistry.Kind.Contract, "liquidity", 3, true);
+        registry.addTemplate(
+            address(liquidityApp), PikaAppRegistry.Kind.Contract, "liquidity", liquidityApp.version(), true
+        );
         registry.setKeeper(KEEPER, true);
         // Deployments start at one chosen app per launch (PikaProjectFees checks the default); the local suites
         // bind several to exercise the fee split.
@@ -276,8 +277,7 @@ abstract contract PikaInfinityFixture is PikaLpHelpers {
         a.initParams.raiseAmount = p.target;
         a.initParams.quoteAsset = _curveQuote(p.quoteToken);
         a.initParams.tokenSalt = p.salt;
-        a.initParams.tokenParams =
-            abi.encode(PikaTokenParams(p.creatorFeeRecipient, p.buyFeeBps, p.sellFeeBps, p.apps));
+        a.initParams.tokenParams = abi.encode(PikaTokenParams(p.creatorFeeRecipient, p.buyFeeBps, p.sellFeeBps, p.apps));
     }
 
     function _launch(LaunchParams memory p) internal returns (PikaToken) {

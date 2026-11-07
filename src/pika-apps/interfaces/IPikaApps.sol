@@ -42,7 +42,8 @@ interface IPikaApp {
 ///         accounts its owner lists.
 interface IPikaHolderBook {
     /// @notice Only a registered launch token calls this, right after a transfer: the two parties and their
-    ///         balances after it. The book decides what shares those balances are worth.
+    ///         balances after it, reported as zero for the launch's own accounts (which never hold shares), and not
+    ///         at all when both parties are such accounts. The book decides what shares those balances are worth.
     /// @dev Constant work plus at most two reads of the token (`isPlatformAccount`), no transfers: it runs inside
     ///      every transfer of the launch, with the transaction's available gas, and the transfer requires it to
     ///      succeed: any failure reverts the balance change too.

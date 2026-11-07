@@ -212,12 +212,17 @@ contract PikaOpenFourLaunchTest is PikaInfinityFixture {
         a.creator = address(this);
         a.quoteAsset = address(wbnb);
         a.tokenParams = abi.encode(PikaTokenParams(address(this), 0, 0, new AppBinding[](0)));
+        // The hub re-checks the supply Core's validator fixes (audit 2026-11-07, R-6): any other supply is refused.
+        vm.expectRevert(PikaLaunchFactory.InvalidConfiguration.selector);
+        PikaToken(fake).initialize(a);
+        a.maxSupply = factory.defaultSupply();
         PikaToken(fake).initialize(a);
         (, PikaLaunchFactory.Phase phase,) = factory.launches(fake);
         assertEq(uint8(phase), uint8(PikaLaunchFactory.Phase.Internal));
         // It is unknown to Core, so it can never open a pool.
         vm.expectRevert();
         factory.graduate(fake, 1 ether, 0);
+        assertEq(PikaToken(fake).totalSupply(), factory.defaultSupply());
     }
 
     function test_OnlyAllowedClonesRegister() public {
@@ -263,7 +268,7 @@ contract PikaOpenFourLaunchTest is PikaInfinityFixture {
         core.createToken(a);
         // Outer fees over the cap.
         p = _params(address(0), true);
-        p.buyFeeBps = 2971;
+        p.buyFeeBps = 971;
         a = _createArgs(p);
         vm.prank(CREATOR);
         vm.expectRevert(PikaLaunchFactory.InvalidConfiguration.selector);

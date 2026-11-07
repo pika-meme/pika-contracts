@@ -22,7 +22,8 @@ interface IWBNB {
 
 /// @notice What a Pika launch fixes in OpenFour's `tokenParams` (decoded by the token while it initializes).
 struct PikaTokenParams {
-    /// @dev The wallet that claims the creator's share of the project fee.
+    /// @dev The wallet that claims the creator's share of the project fee; zero means the creator. It may hand the
+    ///      role over later (`PikaToken.proposeCreatorFeeRecipient`).
     address creatorFeeRecipient;
     /// @dev Outer-pool project fee per direction, on top of the platform fee.
     uint16 buyFeeBps;
@@ -43,6 +44,8 @@ interface IPikaHub {
 
     /// @notice What the hub hands a newly registered token: the components pinned for it and its fee slots.
     /// @dev `positionManager` is Pancake's CL position manager (the LP NFT), a platform account of the launch.
+    ///      `treasury` is the hub's treasury at registration, for the record only: the token reads the current one
+    ///      from the hub (`treasury()`) whenever it pays.
     struct Setup {
         address treasury;
         address hook;

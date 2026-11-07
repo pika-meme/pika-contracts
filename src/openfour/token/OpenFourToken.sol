@@ -144,7 +144,7 @@ contract OpenFourToken is Initializable, ERC20, IOpenFourToken {
         return _tokenMetadataUri;
     }
 
-    function _beforeTokenTransfer(address from, address to, uint256 amount) internal override {
+    function _beforeTokenTransfer(address from, address to, uint256 amount) internal virtual override {
         if (_blocksBeforeMigration(from, to)) {
             revert("Token: pool transfer blocked before migration");
         }

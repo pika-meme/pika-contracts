@@ -11,7 +11,7 @@ library PikaFeeMath {
     uint256 internal constant PLATFORM_FEE_BPS = 30;
     /// @dev The cap on platform plus project fee per direction (`PikaToken.MAX_TOTAL_FEE_BPS`); the hub and the token
     ///      module check launches against it too.
-    uint256 internal constant MAX_TOTAL_FEE_BPS = 3000;
+    uint256 internal constant MAX_TOTAL_FEE_BPS = 1000;
 
     /// @dev The fee inside a gross amount: `floor(gross × bps / 10000)`.
     function feeAt(uint256 gross, uint256 bps) internal pure returns (uint256) {

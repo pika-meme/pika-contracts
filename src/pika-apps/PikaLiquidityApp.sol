@@ -20,7 +20,7 @@ contract PikaLiquidityApp is PikaSinkBase {
     using SafeERC20 for IERC20;
 
     bytes32 public constant KEY = "liquidity";
-    uint16 public constant VERSION = 3;
+    uint16 public constant VERSION = 4;
     uint256 private constant Q96 = 2 ** 96;
 
     /// @notice Pancake's official CL position manager, which mints the burned positions.
@@ -48,6 +48,20 @@ contract PikaLiquidityApp is PikaSinkBase {
     error PriceOutOfRange(uint160 price, uint160 lower, uint160 upper);
     error Expired();
 
+    struct Dispatch {
+        address token;
+        uint256 memeMax;
+        uint256 quoteMax;
+        uint256 swapMinOut;
+        uint160 sqrtPriceMinX96;
+        uint160 sqrtPriceMaxX96;
+    }
+
+    struct Budget {
+        uint256 meme;
+        uint256 quote;
+    }
+
     /// @notice Add what this sink holds for the launch to the pool as burned full-range liquidity, balancing the two
     ///         sides on the pool first. Keeper-only: `swapMinOut` guards the balancing swap (ignored when none is
     ///         needed) and the pool price must sit inside [`sqrtPriceMinX96`, `sqrtPriceMaxX96`] both before the swap
@@ -60,32 +74,55 @@ contract PikaLiquidityApp is PikaSinkBase {
         uint160 sqrtPriceMaxX96,
         uint256 deadline
     ) external nonReentrant returns (uint128 liquidity, uint256 memeAdded, uint256 quoteAdded) {
+        return _addLiquidity(
+            Dispatch(token, type(uint256).max, type(uint256).max, swapMinOut, sqrtPriceMinX96, sqrtPriceMaxX96),
+            deadline
+        );
+    }
+
+    /// @notice Uses at most the two supplied budgets. Fees arriving after preparation stay pending; only the
+    ///         selected funds and what their balancing swap returns can enter the burned position.
+    function addLiquidityLimited(Dispatch calldata d, uint256 deadline)
+        external
+        nonReentrant
+        returns (uint128 liquidity, uint256 memeAdded, uint256 quoteAdded)
+    {
+        if (d.sqrtPriceMinX96 == 0 || d.sqrtPriceMaxX96 < d.sqrtPriceMinX96) revert InvalidParams();
+        return _addLiquidity(d, deadline);
+    }
+
+    function _addLiquidity(Dispatch memory d, uint256 deadline)
+        private
+        returns (uint128 liquidity, uint256 memeAdded, uint256 quoteAdded)
+    {
         _requireActive();
         _requireKeeper();
-        _requireRegistered(token);
+        _requireRegistered(d.token);
         if (block.timestamp > deadline) revert Expired();
-        IPikaLaunchToken t = IPikaLaunchToken(token);
+        IPikaLaunchToken t = IPikaLaunchToken(d.token);
         if (!t.tradingStarted()) revert NotGraduated();
         address quote = t.quoteAsset();
-        _balance(t, quote, swapMinOut, sqrtPriceMinX96, sqrtPriceMaxX96, deadline);
+        Budget memory budget =
+            Budget(Math.min(pending[d.token][d.token], d.memeMax), Math.min(pending[d.token][quote], d.quoteMax));
+        _balance(t, quote, budget, d, deadline);
         (uint160 price, bool memeIs0) = _price(t);
-        if (price < sqrtPriceMinX96 || price > sqrtPriceMaxX96) {
-            revert PriceOutOfRange(price, sqrtPriceMinX96, sqrtPriceMaxX96);
+        if (price < d.sqrtPriceMinX96 || price > d.sqrtPriceMaxX96) {
+            revert PriceOutOfRange(price, d.sqrtPriceMinX96, d.sqrtPriceMaxX96);
         }
-        return _mintBurned(t, quote, memeIs0);
+        return _mintBurned(t, quote, memeIs0, budget);
     }
 
     /// @dev Mints whatever is pending now (the balancing swap's own fee reaches this sink only with a later push) as
     ///      a burned full-range position and books what actually left this contract (the pool rounds up). The
     ///      position manager sweeps back whatever it held, a stranger's leftovers included: those only raise this
     ///      contract's balance, so the books stay covered.
-    function _mintBurned(IPikaLaunchToken t, address quote, bool memeIs0)
+    function _mintBurned(IPikaLaunchToken t, address quote, bool memeIs0, Budget memory budget)
         private
         returns (uint128 liquidity, uint256 memeAdded, uint256 quoteAdded)
     {
         address token = address(t);
-        uint256 meme = pending[token][token];
-        uint256 q = pending[token][quote];
+        uint256 meme = budget.meme;
+        uint256 q = budget.quote;
         uint256 memeBefore = IERC20(token).balanceOf(address(this));
         uint256 quoteBefore = IERC20(quote).balanceOf(address(this));
         uint256 positionId;
@@ -93,8 +130,9 @@ contract PikaLiquidityApp is PikaSinkBase {
             PikaBurnedLiquidity.mint(positionManager, positionManager.clPoolManager(), t.poolKey(), memeIs0, meme, q);
         memeAdded = _spent(token, memeBefore);
         quoteAdded = _spent(quote, quoteBefore);
-        pending[token][token] = meme - memeAdded;
-        pending[token][quote] = q - quoteAdded;
+        if (memeAdded > meme || quoteAdded > q) revert InvalidParams();
+        pending[token][token] -= memeAdded;
+        pending[token][quote] -= quoteAdded;
         emit LiquidityAdded(token, liquidity, memeAdded, quoteAdded, positionId);
     }
 
@@ -125,41 +163,49 @@ contract PikaLiquidityApp is PikaSinkBase {
         }
     }
 
-    /// @dev Checks the pool price sits inside the keeper's range and the pending fees are worth a dispatch, then
-    ///      sells or buys meme on the pool so the two pending sides are worth about the same at that price.
-    function _balance(
-        IPikaLaunchToken t,
-        address quote,
-        uint256 swapMinOut,
-        uint160 sqrtPriceMinX96,
-        uint160 sqrtPriceMaxX96,
-        uint256 deadline
-    ) private {
-        address token = address(t);
-        (uint160 price, bool memeIs0) = _price(t);
-        if (price < sqrtPriceMinX96 || price > sqrtPriceMaxX96) {
-            revert PriceOutOfRange(price, sqrtPriceMinX96, sqrtPriceMaxX96);
-        }
-        uint256 memeValue = _toQuote(pending[token][token], price, memeIs0);
-        uint256 q = pending[token][quote];
-        if (memeValue + q < _minDispatch(quote)) revert BelowThreshold();
-        if (memeValue > q) {
-            uint256 sell = _toMeme((memeValue - q) / 2, price, memeIs0);
-            if (sell != 0) _rebalance(token, quote, true, sell, swapMinOut, deadline);
-        } else if (q > memeValue) {
-            uint256 buy = (q - memeValue) / 2;
-            if (buy != 0) _rebalance(token, quote, false, buy, swapMinOut, deadline);
+    /// @notice Bounded dispatches, independently reverted on failure like `addLiquidityMany`.
+    function addLiquidityLimitedMany(Dispatch[] calldata dispatches, uint256 deadline)
+        external
+        returns (bool[] memory done)
+    {
+        _requireActive();
+        _requireKeeper();
+        done = new bool[](dispatches.length);
+        for (uint256 i; i < dispatches.length; ++i) {
+            try this.addLiquidityLimited(dispatches[i], deadline) {
+                done[i] = true;
+            } catch (bytes memory reason) {
+                emit DispatchSkipped(dispatches[i].token, reason);
+            }
         }
     }
 
-    /// @dev One balancing swap, booked against the pending sides: a sell moves meme into quote, a buy the reverse.
-    function _rebalance(address token, address quote, bool sellMeme, uint256 amountIn, uint256 minOut, uint256 deadline)
+    /// @dev Balances only this dispatch's budgets. Global pending balances continue to cover the unselected funds.
+    function _balance(IPikaLaunchToken t, address quote, Budget memory budget, Dispatch memory d, uint256 deadline)
         private
     {
-        (uint256 spent, uint256 out) = _swap(token, sellMeme, amountIn, minOut, deadline);
-        (address from, address to) = sellMeme ? (token, quote) : (quote, token);
-        pending[token][from] -= spent;
-        pending[token][to] += out;
+        (uint160 price, bool memeIs0) = _price(t);
+        if (price < d.sqrtPriceMinX96 || price > d.sqrtPriceMaxX96) {
+            revert PriceOutOfRange(price, d.sqrtPriceMinX96, d.sqrtPriceMaxX96);
+        }
+        uint256 memeValue = _toQuote(budget.meme, price, memeIs0);
+        uint256 q = budget.quote;
+        if (memeValue + q < _minDispatch(quote)) revert BelowThreshold();
+        bool sell = memeValue > q;
+        uint256 input = sell ? _toMeme((memeValue - q) / 2, price, memeIs0) : (q - memeValue) / 2;
+        if (input == 0) return;
+        (uint256 spent, uint256 out) = _swap(d.token, sell, input, d.swapMinOut, deadline);
+        if (sell) {
+            budget.meme -= spent;
+            budget.quote += out;
+            pending[d.token][d.token] -= spent;
+            pending[d.token][quote] += out;
+        } else {
+            budget.quote -= spent;
+            budget.meme += out;
+            pending[d.token][quote] -= spent;
+            pending[d.token][d.token] += out;
+        }
     }
 
     /// @dev How much of `asset` left this contract since its balance was `before`.
