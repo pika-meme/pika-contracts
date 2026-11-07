@@ -1,0 +1,13 @@
+# Foundry
+out/
+out-lite/
+cache/
+cache-lite/
+broadcast/
+
+# Hardhat
+node_modules/
+artifacts/
+cache-hardhat/
+
+.env

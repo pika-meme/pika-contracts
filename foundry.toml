@@ -1,0 +1,65 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+# Foundry builds the whole tree with one compiler, for types and tests. What ships with OpenFour's compiler settings
+# (solc 0.8.24, paris: the token implementation, the token and migrate modules, the hub) comes from Hardhat
+# (`hardhat.config.js`, `npx hardhat compile`): the deploy scripts and the default-profile tests create those four
+# from its artifacts (`script/PikaRelease.sol`). Everything else ships as built here.
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+# Link test contracts dynamically: a change to a test file recompiles only that file, and a change under src/ does
+# not recompile the tests (2026-10-30). A full via-IR build is still one ~12-minute solc job; use `FOUNDRY_PROFILE=lite`
+# below for iteration.
+dynamic_test_linking = true
+fs_permissions = [
+    { access = "read", path = "out" },
+    # The Hardhat release artifacts of the four contracts built with OpenFour's compiler settings (`PikaRelease`).
+    { access = "read", path = "artifacts" },
+]
+
+[profile.default.fuzz]
+runs = 256
+
+# Fast local iteration (2026-10-30): `FOUNDRY_PROFILE=lite forge test`. The legacy pipeline compiles the whole tree in
+# seconds; every contract under src/ and test/ is kept free of "stack too deep" so it works without via-IR. Only the
+# vendored Pancake Infinity core needs via-IR; it never changes, so its job is compiled once and cached. Deployment,
+# ABI export and gas measurements use the default profile: its via-IR bytecode is what ships.
+[profile.lite]
+via_ir = false
+# Dynamic linking would put the tests into the Pancake core's via-IR job; plain compilation keeps them legacy.
+dynamic_test_linking = false
+out = "out-lite"
+cache_path = "cache-lite"
+# Deploy scripts are not part of the test build (one of them needs via-IR); they compile under the default profile.
+script = "script-not-in-lite"
+# Fork tests skip at runtime without RUN_PIKA_FORK anyway; run them with the default profile.
+skip = ["test/fork/**", "test/openfour-fork/**"]
+# The fixtures deploy artifacts with `vm.deployCode`, which may only read the profile's own out directory.
+fs_permissions = [{ access = "read", path = "out-lite" }]
+
+[[profile.lite.additional_compiler_profiles]]
+name = "ir"
+via_ir = true
+
+[[profile.lite.compilation_restrictions]]
+# Only the pool manager's hook dispatch needs via-IR; a wider glob (the whole lib) would drag every file that imports
+# an Infinity interface into the via-IR job.
+paths = "lib/pancake-infinity-core/src/pool-cl/{CLPoolManager.sol,libraries/CLHooks.sol}"
+via_ir = true
+
+[profile.ci.fuzz]
+runs = 2000
+
+[rpc_endpoints]
+bnb = "${RPC_URL}"
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = true
