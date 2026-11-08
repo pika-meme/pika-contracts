@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md)
 
-Protocol **12**, contracts **v12.9.0**, exported from `johnyjt/pika` commit `1d2bdc6`.
+Protocol **12**, contracts **v12.11.0**, exported from `johnyjt/pika` commit `ad23ca8`.
 This repository contains the source and focused tests submitted for OpenFour review. It does not contain production
 credentials, deployment records, server code, or operational tooling. The descriptions below refer to this source
 snapshot; they do not assert that any live deployment has been upgraded.
@@ -61,8 +61,10 @@ configured official position manager and Infinity contracts. The pool uses tick 
   `MIN_SUPPLY = 1_000_000 ether` and `1e36` smallest units. The lower bound limits the one-token sale remainder's
   missing raise to approximately **5 ppm**, apart from quote-unit rounding.
 - Supply and the 80/20 allocation are checked at creation. The quote must be enabled, with recorded decimals
-  between 6 and 18. The configured target floor in this snapshot is `MIN_TARGET_FLOOR = 1e15` smallest quote units;
-  the per-quote minimum can be higher. Creation also checks that the opening pool price/liquidity is representable.
+  between 6 and 18. The configured target floor is `targetFloor(decimals) = 10 ** decimals / 1000`
+  (0.001 quote units; `1e15` for 18 decimals and `1e3` for 6 decimals); the per-quote minimum can be higher.
+  Creation checks representable liquidity and an opening sqrt price at least 20,000 times away from either
+  protocol edge, matching the graduation mint's 99.99% minimum utilization check.
 - Quote accounting assumes plain, non-rebasing ERC20 transfers without transfer taxes; quote admission is an owner responsibility.
 - Only `tokenParams` carries creator configuration. Vault, curve, trade, migrate and custom-data parameters are empty.
 - Each outer direction charges a **0.3% platform fee** plus a fixed project fee; the sum of configured rates is at
@@ -73,6 +75,18 @@ configured official position manager and Infinity contracts. The pool uses tick 
 - The hook charges any router/locker using the launch pool. Other pools and venues remain available to the token.
   Full-range liquidity is open to third parties; other ranges must be created by the launch's order manager, which
   charges order fees on claim. A fully converted order can convert back until `settle` removes its position.
+
+## v12.11.0 changes since v12.10.0
+
+- Quote admission scales the minimum target with the quote's decimals. The constant getter `MIN_TARGET_FLOOR()`
+  is replaced by `TARGET_FLOOR_DIVISOR()` and `targetFloor(uint8)`; ABI consumers must use the new interface.
+- The opening-price margin increases from 4 to 20,000 at both protocol edges, aligning admission with the
+  full-range graduation position's minimum asset utilization. Existing supply/liquidity bounds remain enforced.
+- Admission regressions cover 6/18-decimal targets and the current `MIN_SUPPLY`/maximum-supply corners. The export
+  also includes the independent liquidity-rounding, keeper-slippage and gas probes from 2026-11-08c.
+
+No storage layout or app template version changes. The hub is not upgradeable: these admission rules require a new
+hub deployment to take effect and do not change existing launches by publishing this source.
 
 ## v12.10.0 changes since v12.9.0
 
@@ -208,6 +222,8 @@ RUN_PIKA_OPENFOUR_FORK=true TESTNET_RPC_URL=<BSC-testnet-RPC> \
 | `test/pika-market/PikaOpenLiquidity.t.sol` | Burned NFT, third-party liquidity, withdrawal ownership and shared app accounting |
 | `test/pika-launch/PikaTreasurySupplySafety.t.sol` | Treasury eligibility, pre-exclusion preserving earnings, minimum-supply boundary and graduation |
 | `test/pika-apps/PikaDispatchSafety.t.sol` | Preview rollback, self-call authentication, bounded balances, separate launches, zero minimum rejection and batch isolation |
+| `test/audit-2026-11-07b/IndependentReview.t.sol` | Quote-decimal and supply/target boundaries, migration authorization, partial-fill refunds and dividend exclusions |
+| `test/audit-2026-11-08c/FreshAudit.t.sol`, `GasProbe.t.sol` | Two 50,000-run liquidity-rounding fuzz tests, keeper slippage, order price protection and hot-path gas |
 
 `test/helpers` contains local OpenFour stand-ins and real Infinity artifact deployment helpers. Local mocks are not
 an audit of OpenFour's closed-source internals. Gas depends on the selected apps and holder state; use
@@ -215,28 +231,27 @@ an audit of OpenFour's closed-source internals. Gas depends on the selected apps
 
 ## Validation of this snapshot
 
-On 2026-11-08 (v12.10.0), a fresh clone with the pinned submodules passed:
+On 2026-11-08 (v12.11.0), a fresh clone populated from the `ad23ca8` export with pinned submodules passed:
 
 - Hardhat dual-compiler build (`--concurrency 1`).
-- Lite profile: **101 passed**.
-- Default release profile: **108 passed, 3 skipped**; real-chain suites were then enabled separately.
+- Lite profile: **115 passed**.
+- Default release profile: **122 passed, 3 skipped**; real-chain suites were then enabled separately.
 - BSC mainnet fork: **7 passed** (Core, deployment and the curve/trade modules).
-- BSC testnet real-Core fork: not rerun for this release (it needs the developer-owned fork registry and a test
-  quote); **7 passed** with `--isolate` at v12.7.0.
-- Compiler-generated storage layouts of the burn and liquidity templates match main-repository v12.6.1; dividend
-  template v15 appends one mapping, `sharesZeroSince` (slot 59), with every earlier slot unchanged.
+- BSC testnet real-Core fork: **7 passed** with `--isolate`, using the developer-owned registry and test quote.
+  The working endpoint was `https://bsc-testnet-dataseed.bnbchain.org`; the PublicNode endpoint returned HTTP 403.
+- No app source or storage declarations changed from v12.10.0. The hub changes constants, validation and getter
+  functions only; its storage declarations are unchanged.
 
-The table below is the v12.7.0 (2026-11-07) testnet fork's `test_GasOnRealCore --isolate` measurement, not remeasured
-for this release. It is a reproducible test scenario, not a bound for arbitrary apps, balances, calldata or network
-state.
+The table below is the v12.11.0 (2026-11-08) testnet fork's `test_GasOnRealCore --isolate` measurement.
+It is a reproducible test scenario, not a bound for arbitrary apps, balances, calldata or network state.
 
 | Step | Gas |
 | --- | ---: |
-| Create with dividend app, no first buy | 3,278,723 |
-| Create without apps | 3,054,216 |
-| Budget buy, new holder | 1,028,851 |
-| Amount buy, new holder | 517,060 |
-| Amount buy, existing holder | 482,860 |
-| Sell | 454,170 |
-| Budget buy that graduates | 1,722,832 |
+| Create with dividend app, no first buy | 3,324,862 |
+| Create without apps | 3,078,157 |
+| Budget buy, new holder | 1,029,289 |
+| Amount buy, new holder | 517,211 |
+| Amount buy, existing holder | 483,011 |
+| Sell | 454,321 |
+| Budget buy that graduates | 1,727,602 |
 | Amount buy without apps, new holder | 484,535 |

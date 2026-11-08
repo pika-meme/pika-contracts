@@ -71,8 +71,14 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     ///         80/20 split the final marginal price is 4.9 * target / supply, so this bounds that dust's missing
     ///         raise to less than 5 ppm of the target (apart from quote-unit rounding).
     uint256 public constant MIN_SUPPLY = 1_000_000 ether;
-    /// @notice The smallest minimum target `configureQuote` accepts, in the quote's smallest units.
-    uint256 public constant MIN_TARGET_FLOOR = 1e15;
+    /// @notice The smallest minimum target `configureQuote` accepts, as a fraction of one whole unit of the quote:
+    ///         `10 ** decimals / TARGET_FLOOR_DIVISOR` (0.001 of a unit, 1e15 for an 18-decimal quote). A floor in
+    ///         absolute smallest units would shut 6-decimal quotes out (review 2026-11-07, R-10).
+    uint256 public constant TARGET_FLOOR_DIVISOR = 1000;
+    /// @dev The full-range opening position must take at least 99.99% of both sides (`_burnPosition`), which needs
+    ///      the opening sqrt price at least 1e4 times away from both ends of the tick range; `_openingPrice` demands
+    ///      twice that margin, so a launch `validate` accepts can always graduate (review 2026-11-07, R-9).
+    uint256 private constant PRICE_EDGE_MARGIN = 20_000;
 
     /// @notice Shared trading and graduation components. Every change publishes a new version; a launch pins the
     ///         version current at its registration. `positionManager` is Pancake's official CL position manager
@@ -319,11 +325,17 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     ///         graduation target a launch on it may choose; existing launches are not affected.
     function configureQuote(address quote, bool enabled, uint256 minTarget) external onlyOwner {
         uint8 decimals = IERC20Metadata(quote).decimals();
-        if (decimals < 6 || decimals > 18 || minTarget < MIN_TARGET_FLOOR || minTarget > 1e30) {
+        if (decimals < 6 || decimals > 18 || minTarget < targetFloor(decimals) || minTarget > 1e30) {
             revert InvalidConfiguration();
         }
         quoteConfigs[quote] = QuoteConfig(enabled, decimals, minTarget);
         emit QuoteConfigured(quote, decimals, enabled, minTarget);
+    }
+
+    /// @notice The smallest minimum target a quote with `decimals` decimals may be configured with, in its smallest
+    ///         units: 0.001 of a whole unit.
+    function targetFloor(uint8 decimals) public pure returns (uint256) {
+        return 10 ** uint256(decimals) / TARGET_FLOOR_DIVISOR;
     }
 
     /// @notice App templates and launch options for launches created afterwards; existing launches keep theirs.
@@ -404,7 +416,8 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         ) revert InvalidConfiguration();
         QuoteConfig memory quote = quoteConfigs[p.quoteAsset];
         if (!quote.enabled || IERC20Metadata(p.quoteAsset).decimals() != quote.decimals) revert UnsupportedQuote();
-        if (p.raiseAmount < MIN_TARGET_FLOOR || p.raiseAmount < quote.minTarget || p.raiseAmount > 1e30) {
+        // `minTarget` is at least the quote's floor (`configureQuote`).
+        if (p.raiseAmount < quote.minTarget || p.raiseAmount > 1e30) {
             revert InvalidConfiguration();
         }
         Sizing memory s = sizing(p.maxSupply, p.raiseAmount);
@@ -624,14 +637,16 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         record = abi.decode(bytes.concat(bytes32(uint256(32)), out), (OpenFourTypes.RuntimeConfig));
     }
 
-    /// @dev The pool's opening price for `seed` meme against `quote`, once the liquidity is representable.
+    /// @dev The pool's opening price for `seed` meme against `quote`, once the liquidity is representable and the
+    ///      price is far enough from both ends of the range for the full-range position to take both sides in full
+    ///      (`PRICE_EDGE_MARGIN`; the usable ends on tick spacing 50 are within 0.2% of the protocol's limits).
     function _openingPrice(bool memeIs0, uint256 seed, uint256 quote) private pure returns (uint160 price) {
         price = memeIs0
             ? PikaGraduationMath.sqrtPriceX96FromAmounts(seed, quote)
             : PikaGraduationMath.sqrtPriceX96FromAmounts(quote, seed);
-        if (price <= TickMath.MIN_SQRT_RATIO * 4 || price >= TickMath.MAX_SQRT_RATIO / 4) {
-            revert InvalidConfiguration();
-        }
+        if (
+            price <= TickMath.MIN_SQRT_RATIO * PRICE_EDGE_MARGIN || price >= TickMath.MAX_SQRT_RATIO / PRICE_EDGE_MARGIN
+        ) revert InvalidConfiguration();
         uint256 liquidityEstimate =
             memeIs0 ? Math.mulDiv(seed, price, uint256(1) << 96) : Math.mulDiv(seed, uint256(1) << 96, price);
         if (liquidityEstimate == 0 || liquidityEstimate > type(uint128).max / 2 / 1_774_545) {
