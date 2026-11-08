@@ -98,13 +98,14 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
     ///      (after OWNER_TIMELOCK_DELAY). Must differ from both Safes and from every hot key.
     address internal constant GUARDIAN = address(0);
 
-    /// @dev Delay of every owner call (factory, app registry, guard). User decision 2026-11-01: every
-    ///      mainnet update delay is 0 (was 24 hours); raise it later with `updateDelay` through the timelock itself
-    ///      (UpdatePikaImplementations PONS_OWNER_TIMELOCK_DELAY).
+    /// @dev Delay of every owner call (factory, app registry, guard). User decision 2026-11-01, reaffirmed 2026-11-08
+    ///      (review 2026-11-07c, T-9): 0 while the deployment settles, to be raised to 24 hours afterwards. A running
+    ///      deployment changes its delay only through the timelock itself (`updateDelay`, after its current delay;
+    ///      UpdatePikaImplementations PONS_OWNER_TIMELOCK_DELAY), so this constant reaches new deployments only.
     uint256 internal constant OWNER_TIMELOCK_DELAY = 0;
     /// @dev Delay of every app template upgrade, the one entry that reaches funds of existing launches; must not be
-    ///      shorter than OWNER_TIMELOCK_DELAY. User decision 2026-11-01: 0 (was 24 hours); raise it later the same way
-    ///      (PONS_UPGRADE_TIMELOCK_DELAY).
+    ///      shorter than OWNER_TIMELOCK_DELAY. Same decision: 0 at first, raised later the same way
+    ///      (PONS_UPGRADE_TIMELOCK_DELAY) to at least the owner delay.
     uint256 internal constant UPGRADE_TIMELOCK_DELAY = 0;
     /// @dev Both Safes must answer `getThreshold()` with at least this many signatures.
     uint256 internal constant MIN_SAFE_THRESHOLD = 2;

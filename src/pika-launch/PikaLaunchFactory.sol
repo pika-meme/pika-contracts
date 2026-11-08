@@ -165,7 +165,10 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
         uint16 sellFeeBps,
         address holderBook
     );
-    /// @dev `orders` is the launch's order manager; `liquidity` is the burned graduation position.
+    /// @dev `orders` is the launch's order manager; `liquidity` is the burned graduation position. `quoteAmount` is
+    ///      the curve's raise (it set the opening price); `memeAmount` is every token the vault handed over, the
+    ///      unsold remainder that was then burned included, and so slightly above the pool's share: what the position
+    ///      took is `GraduationPositionBurned.memeUsed` (review 2026-11-08, O-2).
     event PoolGraduated(
         address indexed token,
         address indexed orders,

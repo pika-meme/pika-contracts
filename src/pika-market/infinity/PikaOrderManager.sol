@@ -36,14 +36,21 @@ import { PikaPermit } from "../../pika-launch/interfaces/IPikaLaunch.sol";
 ///
 ///      Everything a clone needs besides its orders is fixed (2026-11-06): the vault, pool manager, hook and pool
 ///      parameters are implementation immutables (the deployer builds the implementation for one hook), and the launch
-///      token and its quote are the clone's immutable arguments, so a graduation writes no manager state but the
-///      quote allowance. An order is three slots; what a settled order pays out follows from them.
+///      token, its quote and the quote's decimals are the clone's immutable arguments, so a graduation writes no
+///      manager state but the quote allowance. An order is three slots; what a settled order pays out follows from
+///      them.
 contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
     using SafeERC20 for IERC20;
     using PikaVaultSettle for int128;
     using CLPoolParametersHelper for bytes32;
 
-    uint256 public constant MIN_INPUT = 1_000_000;
+    /// @notice The smallest order, as a fraction of one whole unit of the quote: `10 ** quoteDecimals /
+    ///         MIN_INPUT_DIVISOR` (0.01 of a unit, `minQuoteInput`). A quote-funded order deposits at least that; a
+    ///         meme-funded order is worth at least that at the far end of its range, where its input converts to the
+    ///         least quote. An active order lights two ticks that every later swap across them pays to cross, so a
+    ///         floor in smallest units (1e6 until 2026-11-07) let dust deposits raise every large swap's gas
+    ///         (review 2026-11-07c, T-5).
+    uint256 public constant MIN_INPUT_DIVISOR = 100;
     /// @notice The order model the indexer and API rely on (functions, events, `orders`). The 2026-11-06 storage
     ///         layout keeps it, so it stays 9.
     uint256 public constant ORDER_VERSION = 9;
@@ -165,14 +172,29 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
         (base,) = _assets();
     }
 
-    /// @dev The clone's immutable arguments: the launch token and its quote asset.
-    function _assets() private view returns (address base, address quote) {
+    /// @notice The smallest order in quote, in its smallest units (`MIN_INPUT_DIVISOR`).
+    function minQuoteInput() public view returns (uint256) {
+        (,, uint8 quoteDecimals) = _args();
+        return _minQuoteInput(quoteDecimals);
+    }
+
+    function _minQuoteInput(uint8 quoteDecimals) private pure returns (uint256) {
+        return 10 ** uint256(quoteDecimals) / MIN_INPUT_DIVISOR;
+    }
+
+    /// @dev The clone's immutable arguments: the launch token, its quote asset and the quote's decimals (41 bytes).
+    function _args() private view returns (address base, address quote, uint8 quoteDecimals) {
         bytes memory args = Clones.fetchCloneArgs(address(this));
-        if (args.length != 40) revert InvalidConfiguration();
+        if (args.length != 41) revert InvalidConfiguration();
         assembly ("memory-safe") {
             base := shr(96, mload(add(args, 0x20)))
             quote := shr(96, mload(add(args, 0x34)))
+            quoteDecimals := shr(248, mload(add(args, 0x48)))
         }
+    }
+
+    function _assets() private view returns (address base, address quote) {
+        (base, quote,) = _args();
     }
 
     function poolKey() public view returns (PoolKey memory) {
@@ -298,10 +320,19 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
         // spacing could never be added to the pool.
         int24 spacing = tickSpacing;
         if (
-            amount < MIN_INPUT || amount > type(uint128).max || tickLower >= tickUpper
+            amount == 0 || amount > type(uint128).max || tickLower >= tickUpper
                 || tickLower <= TickMath.minUsableTick(spacing) || tickUpper >= TickMath.maxUsableTick(spacing)
                 || tickLower % spacing != 0 || tickUpper % spacing != 0
         ) revert InvalidOrder();
+        (address base, address quote, uint8 quoteDecimals) = _args();
+        // Worth at least `minQuoteInput` in quote: a quote-funded order by its deposit, a meme-funded one at the far
+        // end of its range, where the input converts to the least quote (the same measure `_activate` uses).
+        uint256 worth = zeroForOne == (base < quote)
+            ? V3PriceMath.quote(
+                amount, TickMath.getSqrtRatioAtTick(zeroForOne ? tickLower : tickUpper), zeroForOne, false
+            )
+            : amount;
+        if (worth < _minQuoteInput(quoteDecimals)) revert InvalidOrder();
         orderId = ++orderCount;
         StoredOrder storage created = stored[orderId];
         created.owner = msg.sender;
@@ -312,7 +343,6 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
         // Bounded above.
         // forge-lint: disable-next-line(unsafe-typecast)
         created.input = uint128(amount);
-        (address base, address quote) = _assets();
         _deposit(created, orderId, amount, base, quote);
         PoolKey memory key = _key(base, quote);
         (uint160 spot, bool unlocked) = _spot(key);
@@ -360,7 +390,8 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
 
     /// @dev Whether the pool price sits on the side of the range that leaves the order's input alone.
     function _singleSided(bool zeroForOne, uint160 spot, int24 tickLower, int24 tickUpper) private pure returns (bool) {
-        return zeroForOne ? spot <= TickMath.getSqrtRatioAtTick(tickLower) : spot >= TickMath.getSqrtRatioAtTick(tickUpper);
+        return
+            zeroForOne ? spot <= TickMath.getSqrtRatioAtTick(tickLower) : spot >= TickMath.getSqrtRatioAtTick(tickUpper);
     }
 
     function _activate(uint256 orderId, StoredOrder storage order, PoolKey memory key)
@@ -383,6 +414,8 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
         uint256 used1 = delta.amount1().negative();
         uint256 used = zeroForOne ? used0 : used1;
         if (used == 0 || used > totalInput || (zeroForOne ? used1 : used0) != 0) revert InvalidMint();
+        // `_place` already held the input to the quote floor at this price; this only refuses a position whose
+        // output could round to nothing.
         if (V3PriceMath.quote(used, zeroForOne ? lower : upper, zeroForOne, false) < 2) revert InvalidMint();
         order.liquidityOrFeeBasis = liquidity;
         // At most the input, which fits.
@@ -404,8 +437,9 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
     }
 
     /// @notice Exit the caller's entire order at its current composition, with net payout protection. A funded order
-    ///         that has not activated goes back in full, to `recipient` as well; an order someone already settled is
-    ///         claimed.
+    ///         that has not activated goes back in full, to `recipient` as well; an order someone already settled, or
+    ///         one that has converted in full by now, is settled and claimed (it stays `Settled`); only an order with
+    ///         some of its input still in the range is recorded `Cancelled`.
     function cancelOrder(uint256 orderId, address recipient, uint256 amount0Min, uint256 amount1Min, uint256 deadline)
         external
         nonReentrant
@@ -445,10 +479,15 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
             (amount0, amount1) = _settledPayouts(order);
             (amount0, amount1) = _claim(orderId, order, recipient, amount0, amount1);
         } else {
-            (amount0, amount1) = _close(orderId, order, false);
+            // An order that already converted in full is settled and claimed, exactly as `settle` + `claim` would:
+            // only an incomplete one is a cancellation (review 2026-11-08, N-4).
+            bool filled;
+            (amount0, amount1, filled) = _close(orderId, order, false);
             (amount0, amount1) = _claim(orderId, order, recipient, amount0, amount1);
-            order.status = Status.Cancelled;
-            emit OrderCancelled(orderId, order.owner);
+            if (!filled) {
+                order.status = Status.Cancelled;
+                emit OrderCancelled(orderId, order.owner);
+            }
         }
     }
 
@@ -460,23 +499,25 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
     ///         filled order's position cannot convert back when the price returns.
     /// @dev An incomplete conversion reverts the entire close.
     function settle(uint256 orderId) external nonReentrant returns (uint256 amount0, uint256 amount1) {
-        return _close(orderId, stored[orderId], true);
+        (amount0, amount1,) = _close(orderId, stored[orderId], true);
     }
 
     /// @dev Removes the order's whole position into this contract. The pool charges no LP fee, so the removal returns
     ///      principal only: outside the range it is all the bought asset. Returns what the order pays out before the
     ///      claim's fees, the unused input included; only the bought amount (the fee basis) is kept, since a settled
-    ///      order is fully converted and its payouts follow from it.
+    ///      order is fully converted and its payouts follow from it. `filled` tells whether the position came back
+    ///      without any of the input asset, which is what `settle` requires.
     function _close(uint256 orderId, StoredOrder storage order, bool requireFullFill)
         private
-        returns (uint256 amount0, uint256 amount1)
+        returns (uint256 amount0, uint256 amount1, bool filled)
     {
         if (order.status != Status.Active) revert InvalidState();
         bool zeroForOne = order.zeroForOne;
         BalanceDelta delta = _modify(orderId, order, -int256(uint256(order.liquidityOrFeeBasis)), poolKey());
         amount0 = delta.amount0().positive();
         amount1 = delta.amount1().positive();
-        if (requireFullFill && (zeroForOne ? amount0 : amount1) != 0) revert NotFullyFilled();
+        filled = (zeroForOne ? amount0 : amount1) == 0;
+        if (requireFullFill && !filled) revert NotFullyFilled();
         // The fee is charged on what the order bought, in that asset; a pool delta always fits 128 bits.
         uint256 feeBasis = zeroForOne ? amount1 : amount0;
         uint256 unused = uint256(order.input) - order.reserve - order.inputUsed;
@@ -498,7 +539,7 @@ contract PikaOrderManager is ReentrancyGuardTransient, ILockCallback {
     {
         StoredOrder storage order = stored[orderId];
         if (order.owner != msg.sender) revert UnauthorizedOwner();
-        if (order.status == Status.Active) (amount0, amount1) = _close(orderId, order, true);
+        if (order.status == Status.Active) (amount0, amount1,) = _close(orderId, order, true);
         else (amount0, amount1) = _settledPayouts(order);
         return _claim(orderId, order, recipient, amount0, amount1);
     }

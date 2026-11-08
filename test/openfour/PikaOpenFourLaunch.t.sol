@@ -49,6 +49,8 @@ contract PikaOpenFourLaunchTest is PikaInfinityFixture {
         assertEq(v.remainingForSale(), factory.sizing(factory.defaultSupply(), 18 ether).saleAmount);
         assertTrue(token.isPlatformAccount(address(v)));
         assertTrue(token.isPlatformAccount(token.migrateModule()));
+        // Core itself as well (review 2026-11-07c, T-4).
+        assertTrue(token.isPlatformAccount(address(core)));
         OpenFourTypes.RuntimeConfig memory r = factory.coreRecord(address(token));
         assertTrue(r.exists);
         assertEq(r.presetId, PRESET_ID);

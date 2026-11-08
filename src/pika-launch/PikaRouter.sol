@@ -19,9 +19,10 @@ import { PikaFactoryBound } from "../pika-market/PikaFactoryBound.sol";
 
 /// @notice One shared entry for every graduated launch's pool swaps. Curve trades before graduation go through
 ///         OpenFour Core. Wallets approve a quote asset once for all launches; BNB launches trade native BNB.
-/// @dev Serves only launches of the factory it is bound to: `swap` refuses any other `token`, so a contract that
-///      merely imitates a launch's getters cannot have the router act on it. Holds no trade funds between
-///      transactions; unsolicited balances are never counted as a trade's funds or refund.
+/// @dev Serves only graduated launches of the factory it is bound to: `swap` refuses any other `token`, so a
+///      contract that merely imitates a launch's getters, or a clone of the token code initialized outside Core,
+///      cannot have the router act on it (`_admit`). Holds no trade funds between transactions; unsolicited balances
+///      are never counted as a trade's funds or refund.
 ///      Swap context lives in transient storage; launch tokens read the trader from it when the hook hands them a
 ///      fee. A pool swap settles straight between the trader and the Infinity vault inside the lock: the input the
 ///      pool took (and, on a buy, the platform fee the hook reserved out of it) is pulled from the trader into the
@@ -89,35 +90,41 @@ contract PikaRouter is PikaFactoryBound, ReentrancyGuardTransient, ILockCallback
     }
 
     function swap(SwapParams calldata p) external payable nonReentrant returns (uint256 spent, uint256 output) {
-        return _swap(p);
+        (PikaToken t, PikaToken.RouterContext memory c) = _admit(p);
+        return _poolSwap(t, c, p);
     }
 
     /// @notice Sell meme with an EIP-2612 signature for this router over `amountIn`, in one transaction.
-    /// @dev A front-run permit only consumes the signature; the allowance it set is then used as usual.
+    /// @dev A front-run permit only consumes the signature; the allowance it set is then used as usual. The launch is
+    ///      admitted first, so the router never calls an address of the caller's choosing that is not a trading
+    ///      launch of its factory (review 2026-11-07c, T-6).
     function swapWithPermit(SwapParams calldata p, PikaPermit calldata permit)
         external
         nonReentrant
         returns (uint256 spent, uint256 output)
     {
         if (!p.sellMeme) revert InvalidTrade();
-        try IERC20Permit(p.token)
+        (PikaToken t, PikaToken.RouterContext memory c) = _admit(p);
+        try IERC20Permit(address(t))
             .permit(msg.sender, address(this), permit.value, permit.deadline, permit.v, permit.r, permit.s) { }
             catch { }
-        return _swap(p);
+        return _poolSwap(t, c, p);
     }
 
-    function _swap(SwapParams calldata p) private returns (uint256 spent, uint256 output) {
+    /// @dev Checks the parameters and admits the launch. `isLaunch` also holds for a clone of the token
+    ///      implementation initialized outside Core (it registers with the hub and can never graduate), so it only
+    ///      vouches that `token` runs the code whose getters are read next. What admits the swap is `tradingStarted`,
+    ///      which the hub alone sets, at graduation, together with the router it pinned (review 2026-11-07c, T-3).
+    function _admit(SwapParams calldata p) private view returns (PikaToken t, PikaToken.RouterContext memory c) {
         if (
             p.amountIn == 0 || p.amountIn > uint256(uint128(type(int128).max)) || p.deadline < block.timestamp
                 || p.recipient == address(0) || p.recipient == address(this)
         ) revert InvalidTrade();
-        // Only a launch of the bound factory is trusted for its pool and quote getters.
         if (!IPikaHub(factory).isLaunch(p.token)) revert InvalidTrade();
-        PikaToken t = PikaToken(p.token);
-        PikaToken.RouterContext memory c = t.routerContext();
+        t = PikaToken(p.token);
+        c = t.routerContext();
         // Before graduation the launch trades on its OpenFour curve, through OpenFour Core.
-        if (!c.tradingStarted) revert InvalidTrade();
-        return _poolSwap(t, c, p);
+        if (!c.tradingStarted || c.router != address(this)) revert InvalidTrade();
     }
 
     /// @dev What the lock callback needs: the pool, the direction, the input offered, the price limit, who pays and
@@ -138,7 +145,6 @@ contract PikaRouter is PikaFactoryBound, ReentrancyGuardTransient, ILockCallback
         private
         returns (uint256 spent, uint256 output)
     {
-        if (c.router != address(this)) revert InvalidTrade();
         if (p.nativeQuote && c.quoteAsset != address(wrappedNative)) revert InvalidTrade();
         bool nativeIn = p.nativeQuote && !p.sellMeme;
         if (nativeIn ? msg.value != p.amountIn : msg.value != 0) revert InvalidTrade();

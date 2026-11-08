@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md)
 
-Protocol **12**, contracts **v12.7.0**, exported from `johnyjt/pika` commit `ad604a1`.
+Protocol **12**, contracts **v12.9.0**, exported from `johnyjt/pika` commit `1d2bdc6`.
 This repository contains the source and focused tests submitted for OpenFour review. It does not contain production
 credentials, deployment records, server code, or operational tooling. The descriptions below refer to this source
 snapshot; they do not assert that any live deployment has been upgraded.
@@ -73,6 +73,31 @@ configured official position manager and Infinity contracts. The pool uses tick 
 - The hook charges any router/locker using the launch pool. Other pools and venues remain available to the token.
   Full-range liquidity is open to third parties; other ranges must be created by the launch's order manager, which
   charges order fees on claim. A fully converted order can convert back until `settle` removes its position.
+
+## v12.9.0 changes since v12.7.0
+
+- **v12.8.0, Core as a platform account (T-4):** `PikaToken._initPika` marks the hub's current Core as one of the
+  launch's own accounts, so whatever Core holds inside a transaction never counts as a dividend holder, and Core
+  cannot be proposed as the creator fee wallet.
+- **v12.8.0, quote-denominated order floor (T-5):** `PikaOrderManager`'s flat `MIN_INPUT = 1e6` becomes
+  `minQuoteInput()` = 1/100 of a quote unit (`MIN_INPUT_DIVISOR`). A quote-funded order is measured by its
+  deposit, a meme-funded one by its worth at the far end of its range. `PikaOrderDeployer` appends the quote's
+  decimals as the clone's 41st immutable byte; a clone with the old 40-byte arguments is refused.
+- **v12.8.0, router admits before `permit` (T-6):** `swap` and `swapWithPermit` share `_admit`, which checks the
+  parameters, the hub's `isLaunch`, the token's `routerContext`, `tradingStarted` and the pinned router before the
+  token is called at all. `IPikaHub.isLaunch` documents that it also holds for clones initialized outside Core and
+  never admits a swap by itself.
+- **v12.9.0, cancelling a filled order (N-4):** `PikaOrderManager._close` reports whether the position came back
+  without any of the input asset. `cancelOrder` on an order that has already converted in full settles and claims
+  it exactly as `settle` + `claim` would, leaving it `Settled` with no `OrderCancelled`; only an order with input
+  still in its range is recorded `Cancelled`. Payouts and fees are unchanged.
+- **v12.9.0, `PoolGraduated` documentation (O-2):** the event's `memeAmount` is documented as every token the vault
+  handed over (the burned unsold remainder included); the pool's share is `GraduationPositionBurned.memeUsed`. No ABI
+  change.
+
+No storage layout, interface or template version changes beyond the order manager's immutable arguments, which only
+affect clones deployed after this release. Existing non-upgradeable hubs, tokens and order managers do not change when
+this source is published.
 
 ## v12.7.0 changes since v12.6.1 and upgrade compatibility
 

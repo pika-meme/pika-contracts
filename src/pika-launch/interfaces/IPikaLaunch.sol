@@ -58,6 +58,10 @@ interface IPikaHub {
     function core() external view returns (address);
     function treasury() external view returns (address);
     /// @notice Whether `token` registered as a launch of this hub (in either phase).
+    /// @dev Registration takes any clone of an allowed token implementation, including one initialized outside Core
+    ///      (such a clone can never graduate: the hub requires Core's record). So this says only that `token` runs
+    ///      the allowed code; a component must not grant privileges on it alone. What distinguishes a graduated
+    ///      launch is the token's `tradingStarted`, which the hub alone sets (review 2026-11-07c, T-3).
     function isLaunch(address token) external view returns (bool);
     function registerLaunch(Registration calldata r) external returns (Setup memory s);
     function graduate(address token, uint256 quoteAmount, uint256 extraQuote) external returns (bytes32 poolId);

@@ -104,8 +104,8 @@ contract PikaToken is OpenFourToken {
     /// @dev `keccak256(name())`, fixed at creation, for the EIP-712 domain (O-2).
     bytes32 private _nameHash;
 
-    /// @dev The launch's own addresses that are not immutables: its outer components, OpenFour's vault and modules,
-    ///      the order manager and the fee slots. One read answers `isPlatformAccount` for any of them.
+    /// @dev The launch's own addresses that are not immutables: its outer components, OpenFour's Core, vault and
+    ///      modules, the order manager and the fee slots. One read answers `isPlatformAccount` for any of them.
     mapping(address account => bool own) private own;
     /// @notice The creator's share of project fees pushed (and, in quote, of the raise at graduation) not yet
     ///         claimed, per asset.
@@ -211,6 +211,9 @@ contract PikaToken is OpenFourToken {
         own[c.migrateModule] = true;
         own[c.tokenModule] = true;
         if (c.customDataModule != address(0)) own[c.customDataModule] = true;
+        // Core itself: the mock never holds supply, the real one is closed source, and whatever it may hold across a
+        // transaction must not count as a dividend holder (review 2026-11-07c, T-4).
+        own[IPikaHub(factory).core()] = true;
         emit PikaLaunchConfigured(
             c.creator, c.quoteAsset, p.creatorFeeRecipient, p.buyFeeBps, p.sellFeeBps, s.holderBook
         );

@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-协议版本 **12**，合约版本 **v12.7.0**，来自主仓库 `johnyjt/pika` 提交 `ad604a1`。
+协议版本 **12**，合约版本 **v12.9.0**，来自主仓库 `johnyjt/pika` 提交 `1d2bdc6`。
 本仓库只包含 OpenFour 审核所需的源码和测试，不含生产凭证、部署记录、服务端或运维工具。
 以下描述针对这份源码，不代表线上合约已经升级。
 
@@ -57,6 +57,16 @@ Pika 没有取回毕业 LP 的入口；安全性依赖配置的官方 position m
 - 平台抽取项目费的 **10%**，其余分给应用槽位及创建者。交易仅记账，`pushFees` 后续原子转账并通知应用；任一环节失败则整次回滚。自动推送失败不阻止领取此前已经记入创建者账本的费用。
 - 任意路由/locker 在发射池交易均经过 hook；代币仍可在其他池交易。第三方可提供全区间流动性，其他区间只准由项目订单管理器创建，订单领取时收费。
   订单即使已完全换币，`settle` 移除仓位之前仍可能随价格反转而换回。
+
+## v12.9.0 相对 v12.7.0 的改动
+
+- **v12.8.0，Core 记为平台账户（T-4）**：`PikaToken._initPika` 把中枢当前的 Core 记为项目自己的账户，Core 在一笔交易内持有的代币不计分红份额，也不能被提名为创建者费钱包。
+- **v12.8.0，挂单下限按报价币计（T-5）**：`PikaOrderManager` 固定的 `MIN_INPUT = 1e6` 改为 `minQuoteInput()` = 报价币单位的 1/100（`MIN_INPUT_DIVISOR`）；买单按存入的报价币、卖单按 meme 在区间远端的折算。`PikaOrderDeployer` 把报价币精度作为克隆的第 41 个不可变字节带入，旧的 40 字节参数被拒绝。
+- **v12.8.0，路由先准入再调 `permit`（T-6）**：`swap` 与 `swapWithPermit` 共用 `_admit`，先检查参数、中枢 `isLaunch`、代币的 `routerContext`、`tradingStarted` 和钉死的路由，才会调用代币。`IPikaHub.isLaunch` 注明它对 Core 外初始化的克隆也成立，自身不授予任何交易资格。
+- **v12.9.0，撤销已成交挂单（N-4）**：`PikaOrderManager._close` 返回仓位是否已不含任何输入资产。对已全部转换的单调 `cancelOrder` 等同于 `settle` + `claim`，保留 `Settled`、不发 `OrderCancelled`；只有区间里还有本金的单才记 `Cancelled`。付款和费用不变。
+- **v12.9.0，`PoolGraduated` 注释（O-2）**：事件的 `memeAmount` 注明是 vault 搬来的全部代币（含随后烧掉的未售零头），入池量见 `GraduationPositionBurned.memeUsed`。ABI 不变。
+
+除挂单合约克隆的不可变参数外，没有存储布局、接口或模板版本变化，且只影响本版本之后部署的克隆。发布源码不会改变已部署的不可升级中枢、代币和挂单合约。
 
 ## v12.7.0 相对 v12.6.1 的改动与升级兼容
 
