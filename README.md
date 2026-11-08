@@ -74,6 +74,28 @@ configured official position manager and Infinity contracts. The pool uses tick 
   Full-range liquidity is open to third parties; other ranges must be created by the launch's order manager, which
   charges order fees on claim. A fully converted order can convert back until `settle` removes its position.
 
+## v12.10.0 changes since v12.9.0
+
+- **Dividend template v15, stranded-fee fallback (audit 2026-11-08b, M-1):** release only runs while someone holds
+  shares, so a launch whose minimum holding no account ever reaches kept every fee pushed to the dividend slot in
+  `unreleased` for good. v15 adds `sharesZeroSince(token)` (set at registration, cleared by the first holder, set
+  again when the last holder's shares go to zero; written only when the total crosses zero) and
+  `redirectStranded(token)`: once a launch has had no shares for `STRANDED_DELAY` (30 days), anyone may pay the
+  unreleased fees in both assets to the launch's creator fee wallet (which takes a project fee's remainder when no
+  slot does), emitting `StrandedFeesRedirected`. Holders' accrued `owed` amounts are untouched. For a launch
+  registered before v15 the first call only starts the clock. `IPikaAppToken` gains `creatorFeeRecipient()`, which
+  the token already exposed.
+- **Rounding fallback in the burned-position mint (L-3):** `PikaBurnedLiquidity.mint` derives the liquidity from the
+  hub's holdings as before, then checks what the pool will charge with the pool's own arithmetic
+  (`SqrtPriceMath.getAmount0Delta` / `getAmount1Delta`, rounded up); only when that exceeds the maxima handed to the
+  position manager does it derive once more from `max − 1` (a charge is at most one unit above the amount it was
+  derived from, so the second derivation always fits). Launches that round cleanly keep exactly the liquidity of
+  before. Both the hub's graduation and the liquidity template's dispatches go through it.
+
+Storage layout: the dividend template appends one mapping, `sharesZeroSince`; the other templates are unchanged, and
+interfaces only gain members. The hub's bytecode changes through the library, so a full redeployment is needed for it
+to take effect; deployed non-upgradeable contracts do not change when this source is published.
+
 ## v12.9.0 changes since v12.7.0
 
 - **v12.8.0, Core as a platform account (T-4):** `PikaToken._initPika` marks the hub's current Core as one of the
@@ -193,17 +215,20 @@ an audit of OpenFour's closed-source internals. Gas depends on the selected apps
 
 ## Validation of this snapshot
 
-On 2026-11-07, a fresh clone with the pinned submodules passed:
+On 2026-11-08 (v12.10.0), a fresh clone with the pinned submodules passed:
 
 - Hardhat dual-compiler build (`--concurrency 1`).
 - Lite profile: **101 passed**.
 - Default release profile: **108 passed, 3 skipped**; real-chain suites were then enabled separately.
 - BSC mainnet fork: **7 passed** (Core, deployment and the curve/trade modules).
-- BSC testnet real-Core fork: **7 passed**, with `--isolate`.
-- Compiler-generated storage layouts of burn, dividend and liquidity templates match main-repository v12.6.1.
+- BSC testnet real-Core fork: not rerun for this release (it needs the developer-owned fork registry and a test
+  quote); **7 passed** with `--isolate` at v12.7.0.
+- Compiler-generated storage layouts of the burn and liquidity templates match main-repository v12.6.1; dividend
+  template v15 appends one mapping, `sharesZeroSince` (slot 59), with every earlier slot unchanged.
 
-The testnet fork's `test_GasOnRealCore --isolate` measured these transaction gas costs. They are a reproducible test
-scenario, not a bound for arbitrary apps, balances, calldata or network state.
+The table below is the v12.7.0 (2026-11-07) testnet fork's `test_GasOnRealCore --isolate` measurement, not remeasured
+for this release. It is a reproducible test scenario, not a bound for arbitrary apps, balances, calldata or network
+state.
 
 | Step | Gas |
 | --- | ---: |

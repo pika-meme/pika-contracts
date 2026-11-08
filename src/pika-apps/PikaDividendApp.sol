@@ -32,11 +32,14 @@ import { IPikaHolderBook, IPikaAppToken, IPikaAppFactory, IPikaAppRegistry } fro
 ///      "reward per share" (scaled by 2^128). A holder earns for exactly the seconds it holds, so a buy just before
 ///      a push earns only the seconds' worth it stays. A booking smaller than what is still unreleased joins the
 ///      release in progress instead of restarting the window (version 12). While nobody holds shares the release
-///      waits: the window moves on by the time nobody held. Rounding stays unreleased and goes out later. A holder's owed amount is settled
-///      whenever its shares change and when it claims. Releasing is constant work and runs inside transfers.
+///      waits: the window moves on by the time nobody held; once that has lasted `STRANDED_DELAY`, anyone may send
+///      what is unreleased to the launch's creator fee wallet (`redirectStranded`, version 15: a minimum holding no
+///      account ever reaches must not lock fees here for good, audit 2026-11-08b M-1). Rounding stays unreleased and
+///      goes out later. A holder's owed amount is settled whenever its shares change and when it claims. Releasing
+///      is constant work and runs inside transfers.
 contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
     bytes32 public constant KEY = "dividend";
-    uint16 public constant VERSION = 14;
+    uint16 public constant VERSION = 15;
     /// @notice The highest minimum holding a launch may set, as a share of its supply: 10%. The spread of ordinary
     ///         holdings puts a threshold near the supply out of everyone's reach, and fees sent to a book nobody can
     ///         join are stuck (audit 2026-10-31 M-3). Applies to launches created after this version; earlier
@@ -50,6 +53,11 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
     /// @notice How long an excluded contract keeps its unclaimed earnings before the owner may return them to the
     ///         other holders (`reclaimUnclaimed`): long enough for a listed contract wallet to claim them itself.
     uint256 public constant RECLAIM_DELAY = 180 days;
+    /// @notice How long a launch must have had no shares at all before its unreleased fees may be redirected to its
+    ///         creator fee wallet (`redirectStranded`): fees nobody can ever earn must not stay here for good
+    ///         (audit 2026-11-08b, M-1). Long enough that a launch whose holders all leave and come back within a
+    ///         month keeps its pile.
+    uint256 public constant STRANDED_DELAY = 30 days;
     uint256 private constant SCALE = 2 ** 128;
     address private constant BURN = 0x000000000000000000000000000000000000dEaD;
 
@@ -93,6 +101,10 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
     mapping(address token => Launch) private launches;
     /// @notice When the owner listed an account, per launch; zero when it is not listed. Appended in version 13.
     mapping(address token => mapping(address account => uint64)) public excludedAt;
+    /// @notice Since when the launch has had no shares at all: its registration, or the moment its last holder's
+    ///         shares went to zero; zero while someone holds shares. Appended in version 15. A launch registered
+    ///         before that version reads zero until `redirectStranded` starts its clock.
+    mapping(address token => uint64) public sharesZeroSince;
 
     error TooManyHolders();
 
@@ -108,6 +120,9 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
     /// @notice The owner returned an excluded contract's unclaimed earnings to the launch's unreleased fees, after
     ///         `RECLAIM_DELAY`.
     event UnclaimedReclaimed(address indexed token, address indexed account, uint256 amount, uint256 quoteAmount);
+    /// @notice The launch's unreleased fees went to its creator fee wallet `to` after `STRANDED_DELAY` without any
+    ///         shares (`amount` in the launch token, `quoteAmount` in its quote asset).
+    event StrandedFeesRedirected(address indexed token, address indexed to, uint256 amount, uint256 quoteAmount);
 
     constructor(address registry_) PikaAppBase(registry_) { }
 
@@ -132,6 +147,8 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
         address quote = _quote(token);
         if (quote == address(0)) revert InvalidParams();
         launches[token] = Launch(quote, SafeCast.toUint96(count));
+        // Nobody holds shares yet: the stranded clock runs from here until the first holder.
+        sharesZeroSince[token] = uint64(block.timestamp);
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -248,7 +265,17 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
         uint256 total = beforeTotal;
         if (fromChanges) total = total + fromShares - _settleHolder(token, quote, from, fromShares);
         if (toChanges) total = total + toShares - _settleHolder(token, quote, to, toShares);
-        if (total != beforeTotal) totalShares[token] = total;
+        _writeTotal(token, beforeTotal, total);
+    }
+
+    /// @dev Records a launch's total shares when it changed and, when the change is to or from zero, when the launch
+    ///      last stopped having any (`sharesZeroSince`): two writes only on those transitions, none on an ordinary
+    ///      transfer between holders.
+    function _writeTotal(address token, uint256 before, uint256 total) private {
+        if (total == before) return;
+        totalShares[token] = total;
+        if (total == 0) sharesZeroSince[token] = uint64(block.timestamp);
+        else if (before == 0) sharesZeroSince[token] = 0;
     }
 
     /// @dev One party's shares after a transfer and whether they differ from the recorded ones.
@@ -354,10 +381,46 @@ contract PikaDividendApp is PikaAppBase, IPikaHolderBook {
         emit UnclaimedReclaimed(token, account, amount, quoteAmount);
     }
 
+    /// @notice Pay a launch's unreleased fees, in both assets, to its creator fee wallet once the launch has had no
+    ///         shares at all for `STRANDED_DELAY` (audit 2026-11-08b, M-1). While nobody holds shares the release
+    ///         only waits, so a launch whose minimum holding no account ever reaches (or whose every holder is a
+    ///         platform account or excluded) would otherwise keep every fee pushed to this sink for good. The
+    ///         creator's wallet is what takes a project fee's remainder when no slot does, so the fees fall back to
+    ///         it. What earlier holders already earned (`owed`) is theirs and is not touched. Anyone may call it: the
+    ///         destination is fixed. For a launch registered before version 15 the first call only starts the clock.
+    function redirectStranded(address token) external nonReentrant returns (uint256 amount, uint256 quoteAmount) {
+        (address quote,) = _launch(token);
+        if (totalShares[token] != 0) revert InvalidParams();
+        uint64 since = sharesZeroSince[token];
+        if (since == 0) {
+            sharesZeroSince[token] = uint64(block.timestamp);
+            return (0, 0);
+        }
+        if (block.timestamp < uint256(since) + STRANDED_DELAY) revert InvalidParams();
+        // Without shares this only moves the windows on; the unreleased amounts are what is stranded.
+        _releaseBoth(token, quote);
+        amount = _takeUnreleased(books[token][token]);
+        quoteAmount = _takeUnreleased(books[token][quote]);
+        if (amount == 0 && quoteAmount == 0) return (0, 0);
+        address to = IPikaAppToken(token).creatorFeeRecipient();
+        emit StrandedFeesRedirected(token, to, amount, quoteAmount);
+        _send(token, to, amount);
+        _send(quote, to, quoteAmount);
+    }
+
+    /// @dev Clears a book's unreleased amount and returns it. The next booking restarts the window.
+    function _takeUnreleased(Book storage b) private returns (uint256 amount) {
+        amount = b.unreleased;
+        if (amount == 0) return 0;
+        b.unreleased = 0;
+        b.updatedAt = uint64(block.timestamp);
+    }
+
     /// @dev Settles what the old shares earned in both assets, then records the new shares. Releases ran before.
     function _set(address token, address quote, address holder, uint256 newShares) private {
         uint256 old = _settleHolder(token, quote, holder, newShares);
-        totalShares[token] = totalShares[token] + newShares - old;
+        uint256 before = totalShares[token];
+        _writeTotal(token, before, before + newShares - old);
     }
 
     function _settleHolder(address token, address quote, address holder, uint256 newShares)

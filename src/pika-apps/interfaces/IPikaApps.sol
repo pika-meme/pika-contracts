@@ -63,6 +63,9 @@ interface IPikaAppToken {
     /// @notice The launch's platform accounts, data for the holder book's default exclusion: the zero and burn
     ///         addresses, the vault, the launch's components and its app slots.
     function isPlatformAccount(address account) external view returns (bool);
+    /// @notice The wallet that claims the creator's share of the project fee. Dividends no holder can ever earn
+    ///         fall back to it (`PikaDividendApp.redirectStranded`).
+    function creatorFeeRecipient() external view returns (address);
 }
 
 /// @notice What app templates read from a launch factory.
