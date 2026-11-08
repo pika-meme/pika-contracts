@@ -34,7 +34,8 @@ import { PikaFeeMath } from "../common/libraries/PikaFeeMath.sol";
 ///      out of the gross quote output. Every outer fee is the platform fee plus the launch's project fee for that
 ///      direction; the platform takes `PROJECT_FEE_CUT_BPS` of the project fee as its cut (项目费抽成), the rest
 ///      goes to the launch's app slots by their shares and whatever they leave to the creator's wallet. A trade only
-///      books; `pushFees` (anyone, run by the platform keeper) pays. Curve trades pay OpenFour's fees, not these.
+///      books; `pushFees` (anyone, run by the platform keeper) pays. The platform's part alone can also be paid by
+///      `pushPlatformFees`, which depends on no app. Curve trades pay OpenFour's fees, not these.
 ///
 ///      A launch that bound the holder book (the dividend sink) reports every balance change to it (both parties
 ///      and their balances); who earns is the book's rule, the token answers `isPlatformAccount` as data for it.
@@ -417,6 +418,18 @@ contract PikaToken is OpenFourToken {
         if (paid) lastPushAt = uint64(block.timestamp);
     }
 
+    /// @notice Pays only the platform's part of the booked fees, in both assets: the platform fee (quote) and the
+    ///         platform's cut of the project fee, to the treasury. The project part stays booked for `pushFees`. Open
+    ///         to anyone. It calls no app, so a template whose `onProjectFee` reverts can hold up the slots' and the
+    ///         creator's shares until it is upgraded, but never the platform's (audit 2026-11-08c, F-1). `lastPushAt`
+    ///         does not move: the project fees are still waiting, and the keeper's overdue rule should keep retrying
+    ///         `pushFees` for them.
+    function pushPlatformFees() external {
+        address q = _quote;
+        _pushPlatform(address(this), q);
+        _pushPlatform(q, q);
+    }
+
     /// @notice Pays out everything accrued for the creator's fee wallet, in both assets, to `to`, after pushing the
     ///         booked fees. Anyone may push it to the wallet itself; only the wallet may name another receiver. A push
     ///         that fails does not block the claim (audit 2026-11-02, L-1).
@@ -569,6 +582,19 @@ contract PikaToken is OpenFourToken {
         }
         emit FeesPushed(asset, platform, cut, project);
         return true;
+    }
+
+    /// @dev `_push` for the platform part alone: the platform fee and the cut of one asset's book, cleared to their
+    ///      zero markers before the payment. The project part is left as it is.
+    function _pushPlatform(address asset, address q) private {
+        FeeBook storage stored = books[asset];
+        uint256 platform = _amount(stored.platform);
+        uint256 cut = _amount(stored.cut);
+        if (platform + cut == 0) return;
+        if (platform != 0) stored.platform = 1;
+        if (cut != 0) stored.cut = 1;
+        _pay(asset, treasury(), platform + cut, q);
+        emit FeesPushed(asset, platform, cut, 0);
     }
 
     function _pay(address asset, address to, uint256 amount, address q) private {

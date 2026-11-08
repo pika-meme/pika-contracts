@@ -17,7 +17,9 @@ import {
 ///      pool at the curve's final price and locks the full-range position for good. Migration data version 1 is
 ///      `abi.encode(bytes32 poolId)`, the Infinity pool id. The launch's vault is OpenFour's standard vault
 ///      (2026-11-05): it closes the sale with at most one whole token left (`remainingForSale <= 1e18`), and that
-///      remainder stays locked with the rest of the vault's tokens.
+///      remainder stays locked with the rest of the vault's tokens. The hub prices the pool on the vault's
+///      `totalRaised`, or on the vault's whole quote balance should that ever be less: a gap between the vault's
+///      books and its balance must not leave a sold-out launch on a closed curve for good (audit 2026-11-08c, D-1).
 contract PikaMigrateModule is PikaModuleBase, IOpenFourMigrateModule, IOpenFourModuleSchema {
     uint8 public constant MIGRATED_DATA_VERSION = 1;
 
@@ -56,6 +58,11 @@ contract PikaMigrateModule is PikaModuleBase, IOpenFourMigrateModule, IOpenFourM
 
     /// @notice Moves the vault's balances to the hub and graduates there. `hookData` is ignored: the hub reads the
     ///         raised quote from the vault's books and checks Core's record of the launch itself.
+    /// @dev The vault's quote balance is normally at least `totalRaised` (the anti-sniper surcharge is kept outside
+    ///      the raise). Should it ever fall short, the pool is priced on what the vault holds instead of refusing
+    ///      the migration: the alternative would be a launch nobody can ever graduate, with every holder's funds on a
+    ///      closed curve. The hub still requires the funds it is told about to be present, and refuses a price too
+    ///      close to the protocol's edges (audit 2026-11-08c, D-1).
     function executeMigration(OpenFourTypes.MigrateHookContext calldata ctx, bytes calldata)
         external
         onlyCore
@@ -68,10 +75,10 @@ contract PikaMigrateModule is PikaModuleBase, IOpenFourMigrateModule, IOpenFourM
         uint256 raised = v.totalRaised();
         uint256 quoteBalance = IERC20(quote).balanceOf(ctx.vault);
         uint256 tokenBalance = IERC20(_token).balanceOf(ctx.vault);
-        if (quoteBalance < raised) revert InvalidModuleConfiguration();
+        uint256 priced = quoteBalance < raised ? quoteBalance : raised;
         v.transferQuoteForMigration(hub, quoteBalance);
         v.transferTokenForMigration(hub, tokenBalance);
-        bytes32 poolId = IPikaHub(hub).graduate(_token, raised, quoteBalance - raised);
+        bytes32 poolId = IPikaHub(hub).graduate(_token, priced, quoteBalance - priced);
         return (MIGRATED_DATA_VERSION, abi.encode(poolId));
     }
 

@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-协议版本 **12**，合约版本 **v12.11.0**，来自主仓库 `johnyjt/pika` 提交 `ad23ca8`。
+协议版本 **12**，合约版本 **v12.12.0**，来自主仓库 `johnyjt/pika` 提交 `638c7b0`。
 本仓库只包含 OpenFour 审核所需的源码和测试，不含生产凭证、部署记录、服务端或运维工具。
 以下描述针对这份源码，不代表线上合约已经升级。
 
@@ -55,9 +55,19 @@ Pika 没有取回毕业 LP 的入口；安全性依赖配置的官方 position m
 - 报价币记账假定普通 ERC20 转账，不支持转账税或余额重定基；报价币的准入选择由 owner 负责。
 - 只有 `tokenParams` 带创建者配置；vault、curve、trade、migrate、custom-data 参数均为空。
 - 外盘每方向收 **0.3% 平台费**及固定项目费，配置费率之和最多 **10%**。平台费始终为报价币；买入项目费从代币输出扣，卖出项目费从报价币输出扣。
-- 平台抽取项目费的 **10%**，其余分给应用槽位及创建者。交易仅记账，`pushFees` 后续原子转账并通知应用；任一环节失败则整次回滚。自动推送失败不阻止领取此前已经记入创建者账本的费用。
+- 平台抽取项目费的 **10%**，其余分给应用槽位及创建者。交易仅记账，`pushFees` 后续原子转账并通知应用；任一环节失败则整次回滚。自动推送失败不阻止领取此前已经记入创建者账本的费用。`pushPlatformFees`（v12.12.0）只把平台费和平台抽成付给金库，不通知应用、不更新 `lastPushAt`，应用模板回滚拖不住平台费。
 - 任意路由/locker 在发射池交易均经过 hook；代币仍可在其他池交易。第三方可提供全区间流动性，其他区间只准由项目订单管理器创建，订单领取时收费。
   订单即使已完全换币，`settle` 移除仓位之前仍可能随价格反转而换回。
+
+## v12.12.0 相对 v12.11.0 的改动
+
+来自 2026-11-08c 独立审计（主仓库 `docs/audit-2026-11-08c-fresh-audit.md`）的修复：
+
+- **迁移按托管合约的实际报价币定价（D-1）。** `PikaMigrateModule.executeMigration` 在托管报价币余额低于 `totalRaised` 时不再回滚，而是把 `min(totalRaised, 余额)` 作为定价金额交给中枢，其余记作金库余款。正常运行中两者一致（防狙击附加费不计入募集额）；这次改动只是去掉了"售罄项目永远留在已关闭曲线上"的可能。中枢仍核对告知的资金是否到账以及价格余量。
+- **只付平台费的推送（F-1）。** `PikaToken.pushPlatformFees()` 把两本账里的平台费和项目费抽成付给金库，不通知任何应用；项目费部分留给不变的 `pushFees`。事件为 `FeesPushed(asset, platform, cut, 0)`。
+- **删除不可达的铸仓兜底（O-1）。** v12.10.0 在 `PikaBurnedLiquidity.mint` 里加的"少一个单位重推"分支永远不会执行：按数量推出的流动性在池子向上取整的收费下不会比该数量贵（代数说明见库的注释；`test/audit-2026-11-08c/FreshAudit.t.sol` 两组各 50,000 次模糊）。`mint` 现在直接用推出的流动性。
+
+存储布局不变（代币只增函数，模块和库只改代码）。四个受审合约中 `PikaToken` 和 `PikaMigrateModule` 有改动，`PikaTokenModule` 不变，`PikaLaunchFactory` 只改注释。回归用例：`test/audit-2026-11-08c/FreshAuditFixes.t.sol`。
 
 ## v12.11.0 相对 v12.10.0 的改动
 
@@ -159,11 +169,21 @@ RUN_PIKA_OPENFOUR_FORK=true TESTNET_RPC_URL=<BSC-testnet-RPC> \
 | `test/pika-apps/PikaDispatchSafety.t.sol` | 预览回滚、自调用鉴权、预算、项目隔离、零最低输出拒绝、批量失败隔离 |
 | `test/audit-2026-11-07b/IndependentReview.t.sol` | 报价币精度与供应量/目标边界、迁移鉴权、部分成交退款和分红排除 |
 | `test/audit-2026-11-08c/FreshAudit.t.sol`、`GasProbe.t.sol` | 两组各 50,000 次的流动性取整模糊测试、keeper 滑点、订单价格保护和热路径 gas |
+| `test/audit-2026-11-08c/FreshAuditFixes.t.sol` | 托管报价币缺口下的毕业、应用回滚时只付平台费的推送、两种推送的组合 |
 
 `test/helpers` 包含本地 OpenFour 替身和真实 Infinity 产物部署 helper。本地 mock 不能替代对 OpenFour 闭源内部实现的审计。
 Gas 随应用和持仓状态变化，请用本版本 `test_GasOnRealCore --isolate` 重测，不沿用旧版本数字。
 
 ## 本快照验证结果
+
+2026-11-08（v12.12.0），在全新克隆中导入 `638c7b0` 的审核源码，并使用固定依赖完成：
+
+- Hardhat 双编译器构建（`--concurrency 1`）通过，124 个文件。
+- lite 配置：**118 项通过**（含本版本新增的 3 项回归）。
+- 默认发布配置：**125 项通过、3 项跳过**。
+- BSC 主网分叉：**7 项通过**，覆盖 Core、部署和曲线/交易模块。
+- 本版本没有跑 BSC 测试网真实 Core 分叉：验证环境里没有测试网 Registry、签名者和测试报价币的变量。它覆盖的创建路径自 v12.11.0（见下）起没有变化；本版本改的是迁移和手续费推送，由本地用例覆盖。
+- 存储布局不变。`PikaToken` 新增 `pushPlatformFees`（及一个私有辅助函数）；`PikaMigrateModule`、`PikaBurnedLiquidity` 只改代码；`PikaLaunchFactory` 只改注释。
 
 2026-11-08（v12.11.0），在全新克隆中导入 `ad23ca8` 的审核源码，并使用固定依赖完成：
 

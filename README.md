@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md)
 
-Protocol **12**, contracts **v12.11.0**, exported from `johnyjt/pika` commit `ad23ca8`.
+Protocol **12**, contracts **v12.12.0**, exported from `johnyjt/pika` commit `638c7b0`.
 This repository contains the source and focused tests submitted for OpenFour review. It does not contain production
 credentials, deployment records, server code, or operational tooling. The descriptions below refer to this source
 snapshot; they do not assert that any live deployment has been upgraded.
@@ -71,10 +71,33 @@ configured official position manager and Infinity contracts. The pool uses tick 
   most **10%**. Platform fees are always quote. Buy project fees are meme output; sell project fees are quote output.
 - The platform receives **10% of the project fee**. The rest goes to bound app slots and the creator's remainder.
   Trading only books fees. `pushFees` transfers and notifies apps atomically; a failed transfer/notification rolls
-  the entire push back. Already-accrued creator claims can survive a failed automatic push.
+  the entire push back. Already-accrued creator claims can survive a failed automatic push. `pushPlatformFees`
+  (v12.12.0) pays only the platform fee and the platform's cut to the treasury, calls no app and does not move
+  `lastPushAt`, so a reverting app template cannot hold the platform's part back.
 - The hook charges any router/locker using the launch pool. Other pools and venues remain available to the token.
   Full-range liquidity is open to third parties; other ranges must be created by the launch's order manager, which
   charges order fees on claim. A fully converted order can convert back until `settle` removes its position.
+
+## v12.12.0 changes since v12.11.0
+
+Fixes from the independent audit of 2026-11-08c (`docs/audit-2026-11-08c-fresh-audit.md` in the main repository):
+
+- **Migration prices the pool on the vault's actual quote (D-1).** `PikaMigrateModule.executeMigration` no longer
+  reverts when the vault's quote balance is below `totalRaised`; it hands the hub `min(totalRaised, balance)` as the
+  priced amount and the rest as the treasury's extra. The vault's books and balance agree in normal operation (the
+  anti-sniper surcharge is kept outside the raise); the change only removes a way for a sold-out launch to stay on a
+  closed curve for good. The hub still checks the funds it is told about and the price margin.
+- **Platform-only fee push (F-1).** `PikaToken.pushPlatformFees()` pays the platform fee and the project-fee cut of
+  both books to the treasury without notifying any app; the project part stays booked for `pushFees`, which is
+  unchanged. Emits `FeesPushed(asset, platform, cut, 0)`.
+- **Unreachable mint fallback removed (O-1).** The v12.10.0 "derive again from one unit less" branch in
+  `PikaBurnedLiquidity.mint` could never run: the liquidity `LiquidityAmounts` derives from an amount never costs
+  more than that amount under the pool's rounded-up charge (algebra in the library's comments; two 50,000-run
+  fuzzes in `test/audit-2026-11-08c/FreshAudit.t.sol`). `mint` now uses the derived liquidity directly.
+
+Storage layouts are unchanged (the token gains functions only; the module and the library change code only). Of the
+four reviewed contracts, `PikaToken` and `PikaMigrateModule` changed; `PikaTokenModule` and `PikaLaunchFactory` only
+in a comment. Regressions: `test/audit-2026-11-08c/FreshAuditFixes.t.sol`.
 
 ## v12.11.0 changes since v12.10.0
 
@@ -224,12 +247,25 @@ RUN_PIKA_OPENFOUR_FORK=true TESTNET_RPC_URL=<BSC-testnet-RPC> \
 | `test/pika-apps/PikaDispatchSafety.t.sol` | Preview rollback, self-call authentication, bounded balances, separate launches, zero minimum rejection and batch isolation |
 | `test/audit-2026-11-07b/IndependentReview.t.sol` | Quote-decimal and supply/target boundaries, migration authorization, partial-fill refunds and dividend exclusions |
 | `test/audit-2026-11-08c/FreshAudit.t.sol`, `GasProbe.t.sol` | Two 50,000-run liquidity-rounding fuzz tests, keeper slippage, order price protection and hot-path gas |
+| `test/audit-2026-11-08c/FreshAuditFixes.t.sol` | Graduation on a vault quote shortfall, platform-only fee push while an app reverts, composition of both pushes |
 
 `test/helpers` contains local OpenFour stand-ins and real Infinity artifact deployment helpers. Local mocks are not
 an audit of OpenFour's closed-source internals. Gas depends on the selected apps and holder state; use
 `test_GasOnRealCore --isolate` for this release rather than gas figures from earlier releases.
 
 ## Validation of this snapshot
+
+On 2026-11-08 (v12.12.0), a fresh clone populated from the `638c7b0` export with pinned submodules passed:
+
+- Hardhat dual-compiler build (`--concurrency 1`): 124 files.
+- Lite profile: **118 passed** (the three regressions of this release included).
+- Default release profile: **125 passed, 3 skipped**.
+- BSC mainnet fork: **7 passed** (Core, deployment and the curve/trade modules).
+- The BSC testnet real-Core fork was not run for this release: the verifying environment had no testnet registry,
+  signer or test-quote variables set. The creation path it covers is unchanged since v12.11.0 (below); this release
+  changes migration and fee pushing, which the local suites cover.
+- Storage layouts are unchanged. `PikaToken` gains `pushPlatformFees` (and a private helper); `PikaMigrateModule`
+  and `PikaBurnedLiquidity` change code only; `PikaLaunchFactory` changes a comment.
 
 On 2026-11-08 (v12.11.0), a fresh clone populated from the `ad23ca8` export with pinned submodules passed:
 

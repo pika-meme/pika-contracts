@@ -505,8 +505,9 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
     ///         quote and tokens here: open the launch pool at the curve's final price, mint a full-range position
     ///         with the tokens the curve kept and `POOL_QUOTE_BPS` of the raise to the burn address (a Pancake LP
     ///         NFT nobody can ever withdraw), credit the creator fee wallet `CREATOR_GRADUATION_BPS` of the raise, and
-    ///         open pool trading. `quoteAmount` is the curve's raised quote (it sets the price); the raise's remainder
-    ///         and `extraQuote` (whatever else the vault held: the anti-sniper surcharge, donations) are owed to the
+    ///         open pool trading. `quoteAmount` is the curve's raised quote (it sets the price; the migrate module
+    ///         passes the vault's whole quote instead should that ever be less, D-1); the raise's remainder and
+    ///         `extraQuote` (whatever else the vault held: the anti-sniper surcharge, donations) are owed to the
     ///         treasury (`claimTreasuryQuote`). The unsold remainder the vault may hold (at most one token) is burned.
     function graduate(address tokenAddress, uint256 quoteAmount, uint256 extraQuote)
         external
