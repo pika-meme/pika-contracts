@@ -5,6 +5,7 @@ import { PikaInfinityFixture } from "./helpers/PikaInfinityFixture.sol";
 import { PikaToken } from "../../src/pika-launch/PikaToken.sol";
 import { PikaLaunchFactory } from "../../src/pika-launch/PikaLaunchFactory.sol";
 import { AppBinding } from "../../src/pika-apps/interfaces/IPikaApps.sol";
+import { IOpenFourVault } from "../../src/openfour/interfaces/IOpenFourVault.sol";
 
 contract PikaTreasurySupplySafetyTest is PikaInfinityFixture {
     function launch() private returns (PikaToken t) {
@@ -69,5 +70,87 @@ contract PikaTreasurySupplySafetyTest is PikaInfinityFixture {
         _fill(t, address(usdt));
         assertTrue(t.tradingStarted());
         assertGe(_vaultOf(t).totalRaised(), 12_000 ether * 999_995 / 1_000_000);
+    }
+
+    /// @dev A launch token may also be an approved quote. Its own graduation must preserve the treasury's quote
+    ///      from other launches, even across multiple graduations and unsolicited token donations to the hub.
+    function testFuzzGraduationPreservesTreasuryDebtInLaunchToken(
+        bool tokenIs0,
+        bool quoteIs0,
+        uint8 otherLaunches,
+        uint96 donation
+    ) public {
+        uint256 count = bound(uint256(otherLaunches), 1, 3);
+        uint256 extra = bound(uint256(donation), 0, 1000 ether);
+        PikaToken token = _create(address(0), tokenIs0);
+        _buyAs(token, ALICE, 5 ether, true);
+        factory.configureQuote(address(token), true, 10 ether);
+        for (uint256 i; i < count; ++i) {
+            PikaToken other = _create(address(token), quoteIs0);
+            _fill(other, address(token));
+        }
+        uint256 owed = factory.pendingTreasuryQuote(address(token));
+        assertGt(owed, 100 ether * count);
+        assertEq(token.balanceOf(address(factory)), owed);
+        vm.prank(ALICE);
+        token.transfer(address(factory), extra);
+        uint256 burnedBefore = token.balanceOf(BURN);
+
+        _fill(token, address(0));
+
+        assertEq(factory.pendingTreasuryQuote(address(token)), owed, "graduation preserves the debt");
+        assertEq(token.balanceOf(address(factory)), owed, "the debt remains fully funded");
+        uint256 burned = token.balanceOf(BURN) - burnedBefore;
+        assertGe(burned, extra, "unreserved donations still burn");
+        assertLt(burned, extra + 1 ether, "only donation and graduation dust burn");
+        uint256 treasuryBefore = token.balanceOf(TREASURY);
+        assertEq(factory.claimTreasuryQuote(address(token)), owed);
+        assertEq(token.balanceOf(TREASURY) - treasuryBefore, owed);
+        assertEq(factory.pendingTreasuryQuote(address(token)), 0);
+        assertEq(token.balanceOf(address(factory)), 0);
+    }
+
+    function testTreasuryCanClaimBeforeItsQuoteTokenGraduates() public {
+        PikaToken token = _create(address(0), false);
+        _buyAs(token, ALICE, 5 ether, true);
+        factory.configureQuote(address(token), true, 10 ether);
+        PikaToken other = _create(address(token), true);
+        _fill(other, address(token));
+        uint256 owed = factory.pendingTreasuryQuote(address(token));
+        assertGt(owed, 100 ether);
+        assertEq(factory.claimTreasuryQuote(address(token)), owed);
+        uint256 treasuryBefore = token.balanceOf(TREASURY);
+
+        _fill(token, address(0));
+
+        assertEq(token.balanceOf(TREASURY), treasuryBefore);
+        assertEq(factory.pendingTreasuryQuote(address(token)), 0);
+        assertEq(token.balanceOf(address(factory)), 0);
+    }
+
+    /// @dev Exercise the funding check independently of the migrate module: even its authenticated call cannot
+    ///      count existing treasury debt as funds delivered for the opening position.
+    function testGraduationCannotUseTreasuryDebtToCoverMissingPoolTokens() public {
+        PikaToken token = _create(address(0), true);
+        _buyAs(token, ALICE, 5 ether, true);
+        factory.configureQuote(address(token), true, 10 ether);
+        PikaToken other = _create(address(token), true);
+        _fill(other, address(token));
+        uint256 owed = factory.pendingTreasuryQuote(address(token));
+        uint256 poolTokens = factory.defaultSupply() / 5;
+        vm.prank(ALICE);
+        token.transfer(address(factory), poolTokens - 1);
+        deal(address(wbnb), address(factory), 18 ether);
+        assertEq(token.balanceOf(address(factory)), poolTokens - 1 + owed);
+        vm.mockCall(token.vault(), abi.encodeCall(IOpenFourVault.isSoldOut, ()), abi.encode(true));
+        address migrate = token.migrateModule();
+
+        vm.prank(migrate);
+        vm.expectRevert(PikaLaunchFactory.InvalidConfiguration.selector);
+        factory.graduate(address(token), 18 ether, 0);
+
+        assertFalse(token.tradingStarted());
+        assertEq(factory.pendingTreasuryQuote(address(token)), owed);
+        assertEq(token.balanceOf(address(factory)), poolTokens - 1 + owed);
     }
 }

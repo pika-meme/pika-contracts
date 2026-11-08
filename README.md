@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md)
 
-Protocol **12**, contracts **v12.12.0**, exported from `johnyjt/pika` commit `638c7b0`.
+Protocol **12**, contracts **v12.12.1**, exported from `johnyjt/pika` commit `f03837d`.
 This repository contains the source and focused tests submitted for OpenFour review. It does not contain production
 credentials, deployment records, server code, or operational tooling. The descriptions below refer to this source
 snapshot; they do not assert that any live deployment has been upgraded.
@@ -48,7 +48,9 @@ local tests; real launches use the registered OpenFour vault.
 5. The hub initializes the launch pool, deploys its order manager, and credits **1% of the actual raise** to the
    creator's claimable quote fees. **20% of supply + 98% of the actual raise** fund a full-range Pancake Infinity
    `CLPositionManager` NFT minted directly to `0x000000000000000000000000000000000000dEaD`.
-6. Unsold/rounding meme is sent to the burn address. Remaining quote, including extra vault receipts, is booked
+6. Treasury debt already owed in either asset is reserved throughout graduation, including when the launch token
+   is itself another launch's quote. Only unreserved unsold/rounding meme is sent to the burn address. Remaining
+   unreserved quote, including extra vault receipts, is booked
    as `pendingTreasuryQuote`. Anyone may trigger its payment to the treasury. The pool then opens for trading.
 
 The NFT owner cannot be recovered; Pika has no entry to withdraw the graduation liquidity. This relies on the
@@ -77,6 +79,18 @@ configured official position manager and Infinity contracts. The pool uses tick 
 - The hook charges any router/locker using the launch pool. Other pools and venues remain available to the token.
   Full-range liquidity is open to third parties; other ranges must be created by the launch's order manager, which
   charges order fees on claim. A fully converted order can convert back until `settle` removes its position.
+
+## v12.12.1 changes since v12.12.0
+
+- Graduation treats both assets as `balance - pendingTreasuryQuote[asset]`. A Pika token used as another launch's
+  quote keeps that launch's treasury funds when it later graduates; its opening position and dust burn cannot
+  consume them. A balance below the reserved debt is rejected with `InvalidConfiguration`.
+- Regressions cover multiple launches sharing the token as quote, both currency orderings, unsolicited donations,
+  treasury claims before/after graduation, and insufficient unreserved pool funding. Mainnet and testnet real-Core
+  fork suites both cover the cross-launch quote lifecycle.
+
+No public interface, storage layout or app template version changes. This implementation correction applies to new
+hub deployments; publishing the source does not change existing hubs or restore assets previously burned.
 
 ## v12.12.0 changes since v12.11.0
 
@@ -236,14 +250,14 @@ RUN_PIKA_OPENFOUR_FORK=true TESTNET_RPC_URL=<BSC-testnet-RPC> \
 | Tests | Coverage |
 | --- | --- |
 | `test/openfour/PikaOpenFourLaunch.t.sol` | Creation, validation, registration, inner trades, migration, fake clones, Core/preset changes |
-| `test/fork/DeployPikaMainnet.t.sol` | Real mainnet Core and Infinity, full deployment, role handover and both quote assets |
+| `test/fork/DeployPikaMainnet.t.sol` | Real mainnet Core and Infinity, full deployment, role handover, both quote assets and treasury reserves in a Pika quote |
 | `test/fork/OpenFourBondingCurve.t.sol`, `OpenFourSimpleTrade.t.sol` | Local curve/trade stand-ins against registered mainnet implementations |
-| `test/openfour-fork/PikaOpenFourTestnetFork.t.sol` | Real testnet Core lifecycle, signatures, fees and per-step gas |
+| `test/openfour-fork/PikaOpenFourTestnetFork.t.sol` | Real testnet Core lifecycle, signatures, fees, Pika-quote treasury reserves and per-step gas |
 | `test/pika-launch/PikaInfinityFlow.t.sol` | End-to-end graduation and outer trades |
 | Project fee, cut, pending fee, auto-push and fee-push tests | Fee accounting, destinations, atomic notifications and claims |
 | Guardian and timelock tests | Admission, pause, emergency and ownership boundaries |
 | `test/pika-market/PikaOpenLiquidity.t.sol` | Burned NFT, third-party liquidity, withdrawal ownership and shared app accounting |
-| `test/pika-launch/PikaTreasurySupplySafety.t.sol` | Treasury eligibility, pre-exclusion preserving earnings, minimum-supply boundary and graduation |
+| `test/pika-launch/PikaTreasurySupplySafety.t.sol` | Treasury eligibility, minimum supply, cross-launch quote reserves, donations, funding shortages and claim ordering |
 | `test/pika-apps/PikaDispatchSafety.t.sol` | Preview rollback, self-call authentication, bounded balances, separate launches, zero minimum rejection and batch isolation |
 | `test/audit-2026-11-07b/IndependentReview.t.sol` | Quote-decimal and supply/target boundaries, migration authorization, partial-fill refunds and dividend exclusions |
 | `test/audit-2026-11-08c/FreshAudit.t.sol`, `GasProbe.t.sol` | Two 50,000-run liquidity-rounding fuzz tests, keeper slippage, order price protection and hot-path gas |
@@ -254,6 +268,22 @@ an audit of OpenFour's closed-source internals. Gas depends on the selected apps
 `test_GasOnRealCore --isolate` for this release rather than gas figures from earlier releases.
 
 ## Validation of this snapshot
+
+On 2026-11-08 (v12.12.1), a fresh clone with pinned submodules and all 97 exported files verified against
+main-repository `f03837d` passed:
+
+- Hardhat dual-compiler build (`--concurrency 1`): **124 files**.
+- Lite profile: **121 passed**.
+- Default release profile: **129 passed, 3 skipped**; the real-chain suites were then enabled separately.
+- BSC mainnet fork: **8 passed**. The new treasury-reserve lifecycle passed against the real Core at block
+  **132332298**.
+- BSC testnet real-Core fork: **8 passed** with `--isolate`, including the same cross-launch quote lifecycle and
+  successful treasury payment. These runs only changed local fork state; nothing was broadcast.
+- The cross-launch reserve fuzz regression passed **256 runs** in each profile, covering both currency orderings,
+  one to three quote-funded launches and extra donations. A separate regression refuses to fund a position with
+  reserved treasury assets; another covers treasury payment before the quote token graduates.
+- The release factory artifact uses **solc 0.8.24 / paris / viaIR / optimizer 200** and matches the committed source.
+  Its ABI is identical to v12.12.0 and its deployed bytecode is **21,697 bytes**. No storage declarations changed.
 
 On 2026-11-08 (v12.12.0), a fresh clone populated from the `638c7b0` export with pinned submodules passed:
 
@@ -278,16 +308,16 @@ On 2026-11-08 (v12.11.0), a fresh clone populated from the `ad23ca8` export with
 - No app source or storage declarations changed from v12.10.0. The hub changes constants, validation and getter
   functions only; its storage declarations are unchanged.
 
-The table below is the v12.11.0 (2026-11-08) testnet fork's `test_GasOnRealCore --isolate` measurement.
+The table below is the v12.12.1 (2026-11-08) testnet fork's `test_GasOnRealCore --isolate` measurement.
 It is a reproducible test scenario, not a bound for arbitrary apps, balances, calldata or network state.
 
 | Step | Gas |
 | --- | ---: |
-| Create with dividend app, no first buy | 3,324,862 |
-| Create without apps | 3,078,157 |
-| Budget buy, new holder | 1,029,289 |
-| Amount buy, new holder | 517,211 |
-| Amount buy, existing holder | 483,011 |
-| Sell | 454,321 |
-| Budget buy that graduates | 1,727,602 |
-| Amount buy without apps, new holder | 484,535 |
+| Create with dividend app, no first buy | 3,324,926 |
+| Create without apps | 3,078,189 |
+| Budget buy, new holder | 1,029,333 |
+| Amount buy, new holder | 517,255 |
+| Amount buy, existing holder | 483,055 |
+| Sell | 454,343 |
+| Budget buy that graduates | 1,729,203 |
+| Amount buy without apps, new holder | 484,557 |

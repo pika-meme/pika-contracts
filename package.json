@@ -1,6 +1,6 @@
 {
   "name": "pika-contracts",
-  "version": "12.12.0",
+  "version": "12.12.1",
   "private": true,
   "description": "Pika launch contracts on OpenFour. Hardhat builds the release artifacts (OpenFour's compiler for the token, modules and hub; solc 0.8.26 for the outer market); Foundry runs the tests.",
   "scripts": {

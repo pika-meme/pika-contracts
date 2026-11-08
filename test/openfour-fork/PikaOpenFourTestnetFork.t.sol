@@ -147,6 +147,38 @@ contract PikaOpenFourTestnetForkTest is Test {
         token.pushFees();
     }
 
+    function test_GraduationPreservesTreasuryDebtInPikaQuote() public {
+        if (!enabled) return;
+        PikaToken token = _create(_args(0.1 ether, 0, new AppBinding[](0)), CREATOR);
+        vm.prank(ALICE);
+        core.buyByBudget{ value: 0.02 ether }(address(token), 0.02 ether, 1, 0, "");
+        vm.prank(address(d.timelock));
+        d.hub.configureQuote(address(token), true, 10 ether);
+        OpenFourTypes.CreateTokenArgs memory a = _args(12_000 ether, 0, new AppBinding[](0));
+        a.initParams.quoteAsset = address(token);
+        PikaToken other = _create(a, CREATOR);
+        vm.startPrank(ALICE);
+        token.approve(address(core), 24_000 ether);
+        core.buyByBudget(address(other), 24_000 ether, 1, 0, "");
+        vm.stopPrank();
+        assertTrue(other.tradingStarted());
+        uint256 owed = d.hub.pendingTreasuryQuote(address(token));
+        assertGt(owed, 100 ether);
+        assertEq(token.balanceOf(address(d.hub)), owed);
+
+        vm.prank(BOB);
+        core.buyByBudget{ value: 0.2 ether }(address(token), 0.2 ether, 1, 0, "");
+
+        assertTrue(token.tradingStarted());
+        assertEq(d.hub.pendingTreasuryQuote(address(token)), owed);
+        assertEq(token.balanceOf(address(d.hub)), owed);
+        address treasury = d.hub.treasury();
+        uint256 before = token.balanceOf(treasury);
+        assertEq(d.hub.claimTreasuryQuote(address(token)), owed);
+        assertEq(token.balanceOf(treasury) - before, owed);
+        assertEq(token.balanceOf(address(d.hub)), 0);
+    }
+
     /// @dev Gas of each step on the real Core, for the record (run with `--isolate` so every call is its own
     ///      transaction and starts cold).
     function test_GasOnRealCore() public {

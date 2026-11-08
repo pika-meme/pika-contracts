@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-协议版本 **12**，合约版本 **v12.12.0**，来自主仓库 `johnyjt/pika` 提交 `638c7b0`。
+协议版本 **12**，合约版本 **v12.12.1**，来自主仓库 `johnyjt/pika` 提交 `f03837d`。
 本仓库只包含 OpenFour 审核所需的源码和测试，不含生产凭证、部署记录、服务端或运维工具。
 以下描述针对这份源码，不代表线上合约已经升级。
 
@@ -40,7 +40,7 @@ Pika 不锁交易场所，迁移模块也不填该池名单。标准 Vault 源�
 4. 标准 Vault 在剩余待售不超过 **一整枚** 时判定售罄。迁移模块把 Vault 的两种资产转给中枢；中枢核对受信任 Core 的实际记录、组合、迁移调用者、售罄状态、到账余额和 Infinity Vault 未上锁。
 5. 中枢初始化池、部署订单管理器，将**实际募集额的 1%**记入创建者待领报价币费用。
    **供应量的 20% + 实际募集额的 98%** 经 Pancake 官方 `CLPositionManager` 铸成全区间 NFT，所有者直接为 `0x000000000000000000000000000000000000dEaD`。
-6. 未售余量与舍入剩余代币转给销毁地址；剩余报价币（含 Vault 额外收入）记为 `pendingTreasuryQuote`，任何人可触发付给 treasury。随后开放外盘。
+6. 毕业全程保留两种资产上已有的国库债务，包括当前代币同时作为其他项目报价币的情况。只将未被债务占用的未售余量与舍入剩余代币转给销毁地址；未被既有债务占用的剩余报价币（含 Vault 额外收入）记为 `pendingTreasuryQuote`，任何人可触发付给 treasury。随后开放外盘。
 
 Pika 没有取回毕业 LP 的入口；安全性依赖配置的官方 position manager 和 Infinity 合约。
 池的 tick spacing 为 **50**，全区间为 **[-887250, 887250]**，**LP 费率为零**。
@@ -58,6 +58,13 @@ Pika 没有取回毕业 LP 的入口；安全性依赖配置的官方 position m
 - 平台抽取项目费的 **10%**，其余分给应用槽位及创建者。交易仅记账，`pushFees` 后续原子转账并通知应用；任一环节失败则整次回滚。自动推送失败不阻止领取此前已经记入创建者账本的费用。`pushPlatformFees`（v12.12.0）只把平台费和平台抽成付给金库，不通知应用、不更新 `lastPushAt`，应用模板回滚拖不住平台费。
 - 任意路由/locker 在发射池交易均经过 hook；代币仍可在其他池交易。第三方可提供全区间流动性，其他区间只准由项目订单管理器创建，订单领取时收费。
   订单即使已完全换币，`settle` 移除仓位之前仍可能随价格反转而换回。
+
+## v12.12.1 相对 v12.12.0 的改动
+
+- 毕业的两种资产统一按 `余额 - pendingTreasuryQuote[asset]` 计算可用金额。Pika 代币同时作为其他项目报价币时，它随后毕业也会保留对国库的欠款，入池和尾差销毁均不能挪用。实际余额低于已有债务时以 `InvalidConfiguration` 拒绝。
+- 回归覆盖多个项目共用该代币作报价币、两种资产排序、额外捐赠、毕业前后领取，以及未预留资金不足时拒绝毕业。主网和测试网的真实 Core 分叉均增加交叉报价币生命周期用例。
+
+本次为实现修正，不改变公开接口、存储布局或应用模板版本。修复适用于新部署的中枢；发布源码不会改变已有中枢，也不能恢复此前已经销毁的资产。
 
 ## v12.12.0 相对 v12.11.0 的改动
 
@@ -158,14 +165,14 @@ RUN_PIKA_OPENFOUR_FORK=true TESTNET_RPC_URL=<BSC-testnet-RPC> \
 | 测试 | 覆盖 |
 | --- | --- |
 | `test/openfour/PikaOpenFourLaunch.t.sol` | 创建、校验、登记、内盘、迁移、假克隆、Core/组合切换 |
-| `test/fork/DeployPikaMainnet.t.sol` | 真实主网 Core 与 Infinity、整套部署、权限交接、两种报价币 |
+| `test/fork/DeployPikaMainnet.t.sol` | 真实主网 Core 与 Infinity、整套部署、权限交接、两种报价币与 Pika 报价币国库预留 |
 | `test/fork/OpenFourBondingCurve.t.sol`、`OpenFourSimpleTrade.t.sol` | 本地替身与已登记主网实现的对照 |
-| `test/openfour-fork/PikaOpenFourTestnetFork.t.sol` | 真实测试网 Core 生命周期、签名、费用、分步 gas |
+| `test/openfour-fork/PikaOpenFourTestnetFork.t.sol` | 真实测试网 Core 生命周期、签名、费用、Pika 报价币国库预留与分步 gas |
 | `test/pika-launch/PikaInfinityFlow.t.sol` | 毕业与外盘完整路径 |
 | Project fee、cut、pending fee、auto-push、fee-push 测试 | 费用记账、去向、原子通知和领取 |
 | Guardian、timelock 测试 | 准入、暂停、紧急与管理权限 |
 | `test/pika-market/PikaOpenLiquidity.t.sol` | 销毁 NFT、第三方流动性、提现权限、共享 App 账本 |
-| `test/pika-launch/PikaTreasurySupplySafety.t.sol` | Treasury 资格、预排除保留收益、最低供应量边界与毕业 |
+| `test/pika-launch/PikaTreasurySupplySafety.t.sol` | Treasury 资格、最低供应量、跨项目报价币预留、捐赠、资金缺口与领取顺序 |
 | `test/pika-apps/PikaDispatchSafety.t.sol` | 预览回滚、自调用鉴权、预算、项目隔离、零最低输出拒绝、批量失败隔离 |
 | `test/audit-2026-11-07b/IndependentReview.t.sol` | 报价币精度与供应量/目标边界、迁移鉴权、部分成交退款和分红排除 |
 | `test/audit-2026-11-08c/FreshAudit.t.sol`、`GasProbe.t.sol` | 两组各 50,000 次的流动性取整模糊测试、keeper 滑点、订单价格保护和热路径 gas |
@@ -175,6 +182,16 @@ RUN_PIKA_OPENFOUR_FORK=true TESTNET_RPC_URL=<BSC-testnet-RPC> \
 Gas 随应用和持仓状态变化，请用本版本 `test_GasOnRealCore --isolate` 重测，不沿用旧版本数字。
 
 ## 本快照验证结果
+
+2026-11-08（v12.12.1），使用全新克隆与固定依赖，将全部 97 个审核导出文件与主库 `f03837d` 逐一核对后完成：
+
+- Hardhat 双编译器构建（`--concurrency 1`）：**124 个文件通过**。
+- lite 配置：**121 项通过**。
+- 默认发布配置：**129 项通过、3 项跳过**，随后单独启用真实链分叉测试。
+- BSC 主网分叉：**8 项通过**；新增国库预留回归在区块 **132332298** 的真实 Core 上通过。
+- BSC 测试网真实 Core 分叉：**8 项通过**（`--isolate`），包含同样的交叉报价币生命周期及成功领取国库欠款。以上仅修改本地分叉状态，没有广播交易。
+- 国库预留模糊回归在两套配置中各通过 **256 次**，覆盖两种资产排序、1～3 个使用该报价币的项目及额外捐赠；另有回归分别验证不能挪用欠款补足池子资金，以及报价代币毕业前领取的顺序。
+- 发布工厂产物与已提交源码一致，使用 **solc 0.8.24 / paris / viaIR / optimizer 200**。ABI 与 v12.12.0 完全一致，运行时代码为 **21,697 字节**，存储声明不变。
 
 2026-11-08（v12.12.0），在全新克隆中导入 `638c7b0` 的审核源码，并使用固定依赖完成：
 
@@ -195,15 +212,15 @@ Gas 随应用和持仓状态变化，请用本版本 `test_GasOnRealCore --isola
   本次使用 `https://bsc-testnet-dataseed.bnbchain.org`；PublicNode 节点返回 HTTP 403。
 - 相对 v12.10.0，没有应用源码或存储声明变化；中枢只改常量、校验和 getter，存储声明不变。
 
-下表是 v12.11.0（2026-11-08）测试网分叉 `test_GasOnRealCore --isolate` 得到的交易 gas。这是可复现的测试场景，不是任意应用、余额、calldata 或链状态的 gas 上限。
+下表是 v12.12.1（2026-11-08）测试网分叉 `test_GasOnRealCore --isolate` 得到的交易 gas。这是可复现的测试场景，不是任意应用、余额、calldata 或链状态的 gas 上限。
 
 | 步骤 | Gas |
 | --- | ---: |
-| 带分红应用创建，不首买 | 3,324,862 |
-| 无应用创建 | 3,078,157 |
-| 按预算买，新持有人 | 1,029,289 |
-| 按数量买，新持有人 | 517,211 |
-| 按数量买，已有持有人 | 483,011 |
-| 卖出 | 454,321 |
-| 按预算买并毕业 | 1,727,602 |
-| 无应用按数量买，新持有人 | 484,535 |
+| 带分红应用创建，不首买 | 3,324,926 |
+| 无应用创建 | 3,078,189 |
+| 按预算买，新持有人 | 1,029,333 |
+| 按数量买，新持有人 | 517,255 |
+| 按数量买，已有持有人 | 483,055 |
+| 卖出 | 454,343 |
+| 按预算买并毕业 | 1,729,203 |
+| 无应用按数量买，新持有人 | 484,557 |

@@ -297,6 +297,35 @@ contract DeployPikaMainnetForkTest is Test {
         assertEq(o.minTarget, 10 ether);
     }
 
+    /// @dev Real Core accepts a Pika token as another launch's quote. Its later graduation must leave that quote's
+    ///      existing treasury liability funded; all configuration and execution here are local fork calls.
+    function testGraduationPreservesTreasuryDebtInPikaQuote() public {
+        DeployPikaMainnetScript.Deployment memory d = script.deploy(_config());
+        _listPreset(d);
+        PikaToken token = _create(d, address(0), 0, 0, new AppBinding[](0));
+        _coreBuy(token, address(0), 5 ether);
+        bytes memory call = abi.encodeCall(PikaLaunchFactory.configureQuote, (address(token), true, 10 ether));
+        vm.startPrank(ownerSafe);
+        d.ownerTimelock.schedule(address(d.factory), 0, call, bytes32(0), bytes32(0), 0);
+        d.ownerTimelock.execute(address(d.factory), 0, call, bytes32(0), bytes32(0));
+        vm.stopPrank();
+        PikaToken other = _create(d, address(token), 0, 0, new AppBinding[](0));
+        _graduate(d.factory, other, address(token), 12_000 ether);
+        uint256 owed = d.factory.pendingTreasuryQuote(address(token));
+        assertGt(owed, 100 ether);
+        assertEq(token.balanceOf(address(d.factory)), owed);
+
+        _coreBuy(token, address(0), 36 ether);
+
+        assertTrue(token.tradingStarted());
+        assertEq(d.factory.pendingTreasuryQuote(address(token)), owed);
+        assertEq(token.balanceOf(address(d.factory)), owed);
+        uint256 before = token.balanceOf(d.treasury);
+        assertEq(d.factory.claimTreasuryQuote(address(token)), owed);
+        assertEq(token.balanceOf(d.treasury) - before, owed);
+        assertEq(token.balanceOf(address(d.factory)), 0);
+    }
+
     /// @dev Owner calls run through the owner timelock, proposed and executed by OWNER_SAFE after the delay. The
     ///      CONFIG delays are 0 (2026-11-01); a non-zero delay shows the mechanism.
     function testOwnerSafeRunsTheTimelockAfterTheDelay() public {

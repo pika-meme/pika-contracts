@@ -547,12 +547,12 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
                 || record.quoteAsset != quote
         ) revert Unauthorized();
         if (!IOpenFourVault(record.vault).isSoldOut()) revert WrongPhase();
-        swept = IERC20(tokenAddress).balanceOf(address(this));
+        swept = _unreservedBalance(tokenAddress);
         poolTokens = record.maxSupply - record.saleAmount;
-        // The hub also holds the treasury's pending graduation quote; only what is above it came with this launch.
+        // Either asset may be another launch's quote. Its existing treasury debt is never graduation funding.
         if (
             quoteAmount * POOL_QUOTE_BPS / 10_000 == 0 || swept < poolTokens
-                || IERC20(quote).balanceOf(address(this)) < pendingTreasuryQuote[quote] + quoteAmount + extraQuote
+                || _unreservedBalance(quote) < quoteAmount + extraQuote
         ) revert InvalidConfiguration();
         if (vault.getLocker() != address(0)) revert VaultLocked();
     }
@@ -601,14 +601,23 @@ contract PikaLaunchFactory is Ownable2Step, PikaGuarded, ReentrancyGuard, IPikaH
             revert InvalidConfiguration();
         }
         liquidity = minted;
-        uint256 memeBurned = IERC20(address(token)).balanceOf(address(this));
+        uint256 memeBurned = _unreservedBalance(address(token));
         if (memeBurned != 0) IERC20(address(token)).safeTransfer(PikaBurnedLiquidity.BURN, memeBurned);
-        uint256 owed = IERC20(quote).balanceOf(address(this)) - pendingTreasuryQuote[quote];
+        uint256 owed = _unreservedBalance(quote);
         if (owed != 0) {
             pendingTreasuryQuote[quote] += owed;
             emit TreasuryQuoteAccrued(address(token), quote, owed);
         }
         emit GraduationPositionBurned(address(token), positionId, liquidity, memeUsed, quoteUsed, memeBurned);
+    }
+
+    /// @dev Only funds above this asset's existing treasury debt may fund a graduation, burn or new accrual. The
+    ///      launch token itself can be an approved quote for other launches, so both graduation assets use this.
+    function _unreservedBalance(address asset) private view returns (uint256) {
+        uint256 balance = IERC20(asset).balanceOf(address(this));
+        uint256 reserved = pendingTreasuryQuote[asset];
+        if (balance < reserved) revert InvalidConfiguration();
+        return balance - reserved;
     }
 
     /// @notice Anyone may pay the graduation quote owed to the treasury in one asset. The debt is cleared before the
