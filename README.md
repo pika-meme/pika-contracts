@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md)
 
-Protocol **12**, contracts **v12.12.1**, exported from `johnyjt/pika` commit `f03837d`.
+Protocol **12**, contracts **v13.0.0**, exported from `johnyjt/pika` commit `626b6a0`.
 This repository contains the source and focused tests submitted for OpenFour review. It does not contain production
 credentials, deployment records, server code, or operational tooling. The descriptions below refer to this source
 snapshot; they do not assert that any live deployment has been upgraded.
@@ -79,6 +79,14 @@ configured official position manager and Infinity contracts. The pool uses tick 
 - The hook charges any router/locker using the launch pool. Other pools and venues remain available to the token.
   Full-range liquidity is open to third parties; other ranges must be created by the launch's order manager, which
   charges order fees on claim. A fully converted order can convert back until `settle` removes its position.
+
+## v13.0.0 changes since v12.12.1
+
+A version-only release that opens the `v13` line for OpenFour's review: the Solidity sources, tests, scripts and
+build configuration are byte-for-byte those of v12.12.1 (main-repository `f03837d`); only `package.json` and
+`package-lock.json` carry the new version. The on-chain `PikaLaunchFactory.PROTOCOL_VERSION` stays **12**, and so do
+the deployment scripts' checks, the server's protocol version and the ABI directory name. From here on the major
+version of this repository no longer tracks the protocol version; minor and patch bumps keep their meaning.
 
 ## v12.12.1 changes since v12.12.0
 
@@ -268,6 +276,15 @@ an audit of OpenFour's closed-source internals. Gas depends on the selected apps
 `test_GasOnRealCore --isolate` for this release rather than gas figures from earlier releases.
 
 ## Validation of this snapshot
+
+On 2026-11-08 (v13.0.0), a fresh clone populated from the `626b6a0` export with pinned submodules passed:
+
+- `git diff v12.12.1 HEAD -- src test script foundry.toml remappings.txt hardhat.config.js` is empty: the reviewed
+  sources, tests, scripts and build configuration are those of v12.12.1.
+- Hardhat dual-compiler build (`--concurrency 1`): 124 files.
+- Lite profile: **121 passed**.
+- The default release profile and the real-chain forks were not re-run: the compiled sources are identical to
+  v12.12.1, whose results below stand for this tag.
 
 On 2026-11-08 (v12.12.1), a fresh clone with pinned submodules and all 97 exported files verified against
 main-repository `f03837d` passed:
