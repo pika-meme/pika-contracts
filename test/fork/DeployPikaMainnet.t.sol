@@ -154,8 +154,9 @@ contract DeployPikaMainnetForkTest is Test {
                 )
             );
         } else {
-            // Filled in: this test contract is no funded deployer either way.
-            vm.expectRevert();
+            // Filled in (2026-11-12): the CONFIG is complete, so an unfunded deployer is the first refusal.
+            vm.deal(address(this), 0);
+            vm.expectRevert(bytes("deployer holds less BNB than GAS_RESERVE"));
         }
         script.run();
 
@@ -187,8 +188,11 @@ contract DeployPikaMainnetForkTest is Test {
         c.treasury = makeAddr("eoa");
         _expectRefusal(c, "TREASURY_SAFE has no code: it must be a deployed Safe");
         c = _config();
-        c.keeper = deployer;
-        _expectRefusal(c, "deployer and KEEPER must differ");
+        c.guardian = keeper;
+        _expectRefusal(c, "GUARDIAN must differ from the deployer and the keeper");
+        c = _config();
+        c.guardian = deployer;
+        _expectRefusal(c, "GUARDIAN must differ from the deployer and the keeper");
         c = _config();
         c.keeper = upgradeSafe;
         _expectRefusal(c, "deployer and KEEPER must not be a Safe");
@@ -295,6 +299,35 @@ contract DeployPikaMainnetForkTest is Test {
         o = d.lens.launchOptions(address(factory), USDT);
         assertTrue(o.enabled);
         assertEq(o.minTarget, 10 ether);
+    }
+
+    /// @notice The mainnet CONFIG of 2026-11-12: one Safe in every Safe seat and the guardian seat, the deployer as the
+    ///         keeper. The deployer keeps the keeper role and nothing else; the Safe stops launches at once.
+    function testDeploysWithOneSafeAsGuardianAndTheDeployerAsKeeper() public {
+        DeployPikaMainnetScript.Config memory c = _config();
+        (c.upgradeProposerSafe, c.treasury, c.guardian, c.keeper) = (ownerSafe, ownerSafe, ownerSafe, deployer);
+        DeployPikaMainnetScript.Deployment memory d = script.deploy(c);
+        PikaLaunchFactory factory = d.factory;
+
+        assertEq(d.guard.guardian(), ownerSafe);
+        assertEq(factory.treasury(), ownerSafe);
+        assertTrue(d.apps.registry.keepers(deployer), "the deployer is the keeper");
+        TimelockController owner = d.ownerTimelock;
+        TimelockController upgrade = d.apps.upgradeTimelock;
+        assertTrue(
+            owner.hasRole(owner.PROPOSER_ROLE(), ownerSafe) && upgrade.hasRole(upgrade.PROPOSER_ROLE(), ownerSafe)
+        );
+        assertFalse(
+            owner.hasRole(owner.PROPOSER_ROLE(), deployer) || upgrade.hasRole(upgrade.PROPOSER_ROLE(), deployer)
+        );
+
+        // The deployer is neither owner nor guardian; the Safe, as guardian, stops launches without the timelock.
+        vm.prank(deployer);
+        vm.expectRevert(PikaGuarded.NotGuardian.selector);
+        factory.setLaunchEnabled(false);
+        vm.prank(ownerSafe);
+        factory.setLaunchEnabled(false);
+        assertFalse(factory.launchEnabled());
     }
 
     /// @dev Real Core accepts a Pika token as another launch's quote. Its later graduation must leave that quote's

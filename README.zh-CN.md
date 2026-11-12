@@ -3,8 +3,28 @@
 [English](README.md)
 
 协议版本 **12**，合约版本 **v13.0.0**，来自主仓库 `johnyjt/pika` 提交 `626b6a0`。
-本仓库只包含 OpenFour 审核所需的源码和测试，不含生产凭证、部署记录、服务端或运维工具。
-以下描述针对这份源码，不代表线上合约已经升级。
+本仓库只包含 OpenFour 审核所需的源码和测试，以及 BSC 主网的部署信息（见下节），不含生产凭证、服务端或运维工具。
+以下描述针对这份源码。
+
+## BSC 主网部署（2026-11-12）
+
+用 `script/DeployPikaMainnet.s.sol` 的 `run()` 部署，合约源码就是 `v13.0.0`；部署脚本在 `v13.0.0` 之后改了两处（本节末尾），合约源码没变，所以没有打新 tag。36 笔交易全部成功，块 133174813～133174956。审核的四个合约链上运行时字节码与本仓库 `npx hardhat compile` 的产物（solc 0.8.24、paris、viaIR、200）逐字节一致，只有构造时写入的不可变量不同。完整的地址、角色和交易哈希见 [deployments/pika-bsc-mainnet-2026-11-12.json](deployments/pika-bsc-mainnet-2026-11-12.json)。
+
+**请 Four.meme 在主网 Registry 登记：**
+
+| 调用 | 内容 |
+| --- | --- |
+| `upsertTokenImpl` | `token.pika` → `0x8157708A9dd2e49B7fF50DA75F64AD61A481E800`（`PikaToken`） |
+| `upsertModule` | `module.token.pika`（kind 0）→ `0x072B4B72E984FF312E7e6Ed6f94AEa3c08d3F5ab`（`PikaTokenModule`） |
+| `upsertModule` | `module.migrate.pika_infinity`（kind 4）→ `0xC95941Be322bA976547aA7950743f5c149Cdaa9F`（`PikaMigrateModule`） |
+| `upsertPreset` | vault / curve / trade 用官方已登记的 `VAULT_BASIC` / `CURVE_BONDING` / `TRADE_SIMPLE`；`customDataId` 0；validator 为中枢 `0x08C9768cf1DfddD5CB6de41052D338954Bd9e7e7`；author 为 `0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877`；`active`、`createEnabled` |
+| `FeeRouter.setPresetFeeConfig` | 协议 0.5% + 开发者 0.5%（同 Creator Incentives），合作方分成 50% |
+
+登记后由 owner timelock 执行中枢的 `setPreset(<组合 id>, true)`，之后才能创建。
+
+**其他合约**：owner timelock `0xf466Eaf2E084794d29F1dfAaa845886578EbC8e9`、模板升级 timelock `0x0539668f5B8820c2d2151a035C848Ba5F836619C`（延迟都是 0，提议、执行、取消角色都是 2/3 Safe `0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877`，它也是金库和 guardian）、`PikaGuard` `0x90497a59EEb0B577AbaDC5d5Cb6033a1578EC8C8`、应用登记表 `0x93c666e75b5c3770bF08cA908c1C725138ae4f20`（keeper 为部署钱包 `0x954BEcdbCf363e143A013169cc5168Fcd270Ba25`）、回购销毁 `0x4C79D5e1A2e939d840912c7a4F2bD472E9b43c42`、持币分红 `0x39e6101A68547B458eEd54D5f83617F77844f3dd`、加池子 `0xC573F6DC36fEFbE427710001C35131fc6ECB070E`、Router `0xf626d0228A4c27072774C1660d3141ADCD000584`、Hook `0x1A6F3c958d8E98d478eA382a2622A786A3195739`、订单部署器 `0x3020d22129FCC0c5092a7F035F7d7FBdc80b7996`、TradeLens `0xD514b39216C3BaafbE05f98bd16F25E5c8Bb928E`；仓位合约是 Pancake 官方 `CLPositionManager` `0x55f4c8abA71A1e923edC303eb4fEfF14608cC226`。OpenFour 主网 Registry `0x912CEf0C3aE9Ab6eB3Ec87cab69371cFb317Ab94`、Core `0xebe7b6C1089D9F72aD07f34E36d898e44E5e27f3`。
+
+**部署脚本在 `v13.0.0` 之后的改动**（只有 `script/DeployPikaMainnet.s.sol` 和 `test/fork/DeployPikaMainnet.t.sol`）：CONFIG 填入上面的地址；部署前检查允许 guardian 是三个 Safe 之一（仍不能是部署钱包或 keeper），允许 keeper 就是部署钱包（部署后它只保留 keeper 角色）；分叉测试按这个形态补了用例。主网分叉测试全部通过。
 
 ## 审核范围
 
@@ -131,7 +151,7 @@ Pika 没有取回毕业 LP 的入口；安全性依赖配置的官方 position m
 - Pika 模块实现将 `(hub, core)` 固定为不可变量；OpenFour 治理保留 beacon、Core、Registry 等权限。已有项目也跟随 beacon，不能把旧 beacon 升级成绑定另一中枢/Core 的实现；不兼容的接线或存储应使用新模块键和单独审核的组合。
 - 平台的独立升级权限可升级共享 App，影响存量项目。错误的 holder-book 升级可能阻断转账；暂停 sink 不绕过持仓记账，也不暂停分红领取。
 - Guardian 只能收紧：停创建、撤销 keeper、禁用模板或暂停其交易入口。
-- 主网部署脚本当前的 owner 和升级延时均为 **零**，并检查 Safe 门槛。这是治理选择，不提供强制响应窗口；线上实际权限需要单独核对。
+- 主网部署脚本当前的 owner 和升级延时均为 **零**，并检查 Safe 门槛；guardian 可以是 Safe，keeper 可以是部署钱包（见“BSC 主网部署”）。这是治理选择，不提供强制响应窗口；线上实际权限需要单独核对。
 
 ## 构建与验证
 

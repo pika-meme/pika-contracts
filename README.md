@@ -3,9 +3,47 @@
 [中文](README.zh-CN.md)
 
 Protocol **12**, contracts **v13.0.0**, exported from `johnyjt/pika` commit `626b6a0`.
-This repository contains the source and focused tests submitted for OpenFour review. It does not contain production
-credentials, deployment records, server code, or operational tooling. The descriptions below refer to this source
-snapshot; they do not assert that any live deployment has been upgraded.
+This repository contains the source and focused tests submitted for OpenFour review, and the BSC mainnet deployment
+(next section). It does not contain production credentials, server code, or operational tooling. The descriptions below
+refer to this source snapshot.
+
+## BSC mainnet deployment (2026-11-12)
+
+Deployed with `run()` of `script/DeployPikaMainnet.s.sol` from the `v13.0.0` contract sources. The deployment script
+changed in two ways after `v13.0.0` (end of this section); the contract sources did not, so there is no new tag. All 36
+transactions succeeded, blocks 133174813–133174956. The runtime bytecode of the four reviewed contracts on chain equals
+this repository's `npx hardhat compile` output (solc 0.8.24, paris, viaIR, 200 runs) byte for byte, apart from the
+immutables written at construction. Every address, role and transaction hash is in
+[deployments/pika-bsc-mainnet-2026-11-12.json](deployments/pika-bsc-mainnet-2026-11-12.json).
+
+**For Four.meme to list in the mainnet Registry:**
+
+| Call | Entry |
+| --- | --- |
+| `upsertTokenImpl` | `token.pika` → `0x8157708A9dd2e49B7fF50DA75F64AD61A481E800` (`PikaToken`) |
+| `upsertModule` | `module.token.pika` (kind 0) → `0x072B4B72E984FF312E7e6Ed6f94AEa3c08d3F5ab` (`PikaTokenModule`) |
+| `upsertModule` | `module.migrate.pika_infinity` (kind 4) → `0xC95941Be322bA976547aA7950743f5c149Cdaa9F` (`PikaMigrateModule`) |
+| `upsertPreset` | vault / curve / trade: the listed standard `VAULT_BASIC` / `CURVE_BONDING` / `TRADE_SIMPLE`; `customDataId` 0; validator the hub `0x08C9768cf1DfddD5CB6de41052D338954Bd9e7e7`; author `0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877`; `active`, `createEnabled` |
+| `FeeRouter.setPresetFeeConfig` | protocol 0.5% + developer 0.5% (as Creator Incentives), partner share 50% |
+
+Once listed, the owner timelock runs the hub's `setPreset(<preset id>, true)`; creation opens after that.
+
+**Other contracts**: owner timelock `0xf466Eaf2E084794d29F1dfAaa845886578EbC8e9`, template upgrade timelock
+`0x0539668f5B8820c2d2151a035C848Ba5F836619C` (both delays 0; proposer, executor and canceller are the 2-of-3 Safe
+`0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877`, also the treasury and the guardian), `PikaGuard`
+`0x90497a59EEb0B577AbaDC5d5Cb6033a1578EC8C8`, app registry `0x93c666e75b5c3770bF08cA908c1C725138ae4f20` (keeper: the
+deployer `0x954BEcdbCf363e143A013169cc5168Fcd270Ba25`), burn sink `0x4C79D5e1A2e939d840912c7a4F2bD472E9b43c42`,
+dividend sink `0x39e6101A68547B458eEd54D5f83617F77844f3dd`, liquidity sink
+`0xC573F6DC36fEFbE427710001C35131fc6ECB070E`, router `0xf626d0228A4c27072774C1660d3141ADCD000584`, hook
+`0x1A6F3c958d8E98d478eA382a2622A786A3195739`, order deployer `0x3020d22129FCC0c5092a7F035F7d7FBdc80b7996`, trade lens
+`0xD514b39216C3BaafbE05f98bd16F25E5c8Bb928E`; the position manager is Pancake's `CLPositionManager`
+`0x55f4c8abA71A1e923edC303eb4fEfF14608cC226`. OpenFour mainnet Registry `0x912CEf0C3aE9Ab6eB3Ec87cab69371cFb317Ab94`,
+Core `0xebe7b6C1089D9F72aD07f34E36d898e44E5e27f3`.
+
+**Deployment-script changes after `v13.0.0`** (only `script/DeployPikaMainnet.s.sol` and
+`test/fork/DeployPikaMainnet.t.sol`): the CONFIG holds the addresses above; the pre-flight checks let the guardian be
+one of the Safes (never the deployer or the keeper) and let the keeper be the deployer, which keeps only the keeper role
+after the deployment; the fork test covers that shape. The mainnet fork tests pass.
 
 ## Review scope
 
@@ -218,7 +256,7 @@ reservation refunds credit the swap caller's vault delta; treasury and creator f
 - The platform's separate upgrade authority can upgrade shared App proxies, including for existing launches.
   A faulty holder-book upgrade can block transfers; pausing a sink does not bypass holder accounting or stop claims.
 - Guardian powers only tighten: stop creation, revoke a keeper, disable a template or pause its trading entries.
-- Mainnet deployment scripts currently specify **zero owner and upgrade delay**, with Safe threshold checks.
+- Mainnet deployment scripts currently specify **zero owner and upgrade delay**, with Safe threshold checks; the guardian may be a Safe and the keeper may be the deployer (see "BSC mainnet deployment").
   This is a governance choice, not an enforced response window. Live permissions must be checked separately.
 
 ## Build and validation

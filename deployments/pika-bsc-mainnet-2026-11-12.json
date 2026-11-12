@@ -1,0 +1,288 @@
+{
+  "note": "Pika protocol v12 (contracts v13.0.0 sources) on BSC mainnet, deployed 2026-11-12 by script/DeployPikaMainnet.s.sol run(). The OpenFour preset is not listed yet (presetId null); the owner timelock accepts it with setPreset once Four.meme lists it.",
+  "chainId": 56,
+  "sourceCommit": "johnyjt/pika 35f2b39",
+  "script": "script/DeployPikaMainnet.s.sol:DeployPikaMainnetScript (run)",
+  "deployer": "0x954BEcdbCf363e143A013169cc5168Fcd270Ba25",
+  "roles": {
+    "ownerSafe": "0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877",
+    "treasurySafe": "0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877",
+    "upgradeProposerSafe": "0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877",
+    "guardian": "0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877",
+    "keeper": "0x954BEcdbCf363e143A013169cc5168Fcd270Ba25",
+    "ownerTimelockDelay": 0,
+    "upgradeTimelockDelay": 0
+  },
+  "contracts": {
+    "launchHub": "0x08C9768cf1DfddD5CB6de41052D338954Bd9e7e7",
+    "tokenImplementation": "0x8157708A9dd2e49B7fF50DA75F64AD61A481E800",
+    "tokenModule": "0x072B4B72E984FF312E7e6Ed6f94AEa3c08d3F5ab",
+    "migrateModule": "0xC95941Be322bA976547aA7950743f5c149Cdaa9F",
+    "ownerTimelock": "0xf466Eaf2E084794d29F1dfAaa845886578EbC8e9",
+    "templateUpgradeTimelock": "0x0539668f5B8820c2d2151a035C848Ba5F836619C",
+    "guard": "0x90497a59EEb0B577AbaDC5d5Cb6033a1578EC8C8",
+    "appRegistry": "0x93c666e75b5c3770bF08cA908c1C725138ae4f20",
+    "burnApp": "0x4C79D5e1A2e939d840912c7a4F2bD472E9b43c42",
+    "dividendApp": "0x39e6101A68547B458eEd54D5f83617F77844f3dd",
+    "liquidityApp": "0xC573F6DC36fEFbE427710001C35131fc6ECB070E",
+    "router": "0xf626d0228A4c27072774C1660d3141ADCD000584",
+    "hook": "0x1A6F3c958d8E98d478eA382a2622A786A3195739",
+    "orderDeployer": "0x3020d22129FCC0c5092a7F035F7d7FBdc80b7996",
+    "tradeLens": "0xD514b39216C3BaafbE05f98bd16F25E5c8Bb928E",
+    "positionManager": "0x55f4c8abA71A1e923edC303eb4fEfF14608cC226"
+  },
+  "openFour": {
+    "registry": "0x912CEf0C3aE9Ab6eB3Ec87cab69371cFb317Ab94",
+    "core": "0xebe7b6C1089D9F72aD07f34E36d898e44E5e27f3",
+    "toList": {
+      "tokenImpl": {
+        "tag": "token.pika",
+        "impl": "0x8157708A9dd2e49B7fF50DA75F64AD61A481E800"
+      },
+      "modules": [
+        {
+          "tag": "module.token.pika",
+          "kind": 0,
+          "impl": "0x072B4B72E984FF312E7e6Ed6f94AEa3c08d3F5ab"
+        },
+        {
+          "tag": "module.migrate.pika_infinity",
+          "kind": 4,
+          "impl": "0xC95941Be322bA976547aA7950743f5c149Cdaa9F"
+        }
+      ],
+      "preset": {
+        "vault": "module.vault.standard (VAULT_BASIC)",
+        "curve": "module.curve.bonding (CURVE_BONDING)",
+        "trade": "module.trade.simple (TRADE_SIMPLE)",
+        "customDataId": 0,
+        "validator": "0x08C9768cf1DfddD5CB6de41052D338954Bd9e7e7",
+        "author": "0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877",
+        "fees": "protocol 50 bps + developer 50 bps, partner share 50%"
+      }
+    },
+    "presetId": null
+  },
+  "firstBlock": "0x7f0161d",
+  "lastBlock": "0x7f016ac",
+  "transactions": [
+    {
+      "hash": "0x85b5226b7cce1b50609a862bb310019b944cf2809684c06b73dddf2e749ad8d7",
+      "contractName": "PikaGuard",
+      "contractAddress": "0x90497a59eeb0b577abadc5d5cb6033a1578ec8c8",
+      "function": null
+    },
+    {
+      "hash": "0x3cb5f500e8cf05d63d9361e915d1955fb9381e851d7e9af3a49bdf3ea8bfff79",
+      "contractName": "TimelockController",
+      "contractAddress": "0x0539668f5b8820c2d2151a035c848ba5f836619c",
+      "function": null
+    },
+    {
+      "hash": "0x82be0751667943ca1a50b96e5372764c609278b46b7b8a73d57409748b9e7564",
+      "contractName": "PikaAppRegistry",
+      "contractAddress": "0x93c666e75b5c3770bf08ca908c1c725138ae4f20",
+      "function": null
+    },
+    {
+      "hash": "0x063262d73edd5616f6d3bdbd6cad86223e626eb1f06f50ae1d69eaee16d89b17",
+      "contractName": "PikaBurnApp",
+      "contractAddress": "0x5de0bd9f78d3e74ec6b33cba3029ff27b51fe987",
+      "function": null
+    },
+    {
+      "hash": "0xbe71f5f8111725ea0a92f93298cd444ee9cd11780b12d9e5434deb614e62cb26",
+      "contractName": "ERC1967Proxy",
+      "contractAddress": "0x4c79d5e1a2e939d840912c7a4f2bd472e9b43c42",
+      "function": null
+    },
+    {
+      "hash": "0x68ce64a54aae3bc58ecf788783675bce04235a4679775144035e69c8b047c0ed",
+      "contractName": "PikaDividendApp",
+      "contractAddress": "0xe0e8e66eb79d768a64ce7ccba40e10697183ac87",
+      "function": null
+    },
+    {
+      "hash": "0x1c1705efe34e49d966af2879db94cd631e38f4eb8ecf1e1b758ec8532d8604c4",
+      "contractName": "ERC1967Proxy",
+      "contractAddress": "0x39e6101a68547b458eed54d5f83617f77844f3dd",
+      "function": null
+    },
+    {
+      "hash": "0xf85cdbac1360afd28d24489ba750441b752f4b3e5a0b5cf75842946bf80d27e6",
+      "contractName": "PikaLiquidityApp",
+      "contractAddress": "0x3ddb5da623f349743eabd1e74ac4d93f27ec06c4",
+      "function": null
+    },
+    {
+      "hash": "0x0fc3db601425d2c3321f3f13469d3244da5e33908d5d282273ac2ae2b4aa3b18",
+      "contractName": "ERC1967Proxy",
+      "contractAddress": "0xc573f6dc36fefbe427710001c35131fc6ecb070e",
+      "function": null
+    },
+    {
+      "hash": "0x0bba75cf24b012021e696ce8c9f379361934b0c1939c4286341b30fa691ea739",
+      "contractName": "PikaHook",
+      "contractAddress": "0x1a6f3c958d8e98d478ea382a2622a786a3195739",
+      "function": null
+    },
+    {
+      "hash": "0x70ef320fa0b6ff4f421d68c3b4d73c135a2a75958d1623fef1cea6c550a234ea",
+      "contractName": "PikaRouter",
+      "contractAddress": "0xf626d0228a4c27072774c1660d3141adcd000584",
+      "function": null
+    },
+    {
+      "hash": "0xc7215697c75ba947bbf192a6d0332706e81af5b22642c3f4415988ab67b8428b",
+      "contractName": "PikaOrderDeployer",
+      "contractAddress": "0x3020d22129fcc0c5092a7f035f7d7fbdc80b7996",
+      "function": null
+    },
+    {
+      "hash": "0xc3852b45f59e3932b5aecd14c4c87137c8b0ca1f8e805aadfd8864b7e3c78f23",
+      "contractName": null,
+      "contractAddress": "0x08c9768cf1dfddd5cb6de41052d338954bd9e7e7",
+      "function": null
+    },
+    {
+      "hash": "0xc1f1116158ff92f54a88f08cb667b624428c00cb7dd26add85eff6957fc173f9",
+      "contractName": null,
+      "contractAddress": "0x8157708a9dd2e49b7ff50da75f64ad61a481e800",
+      "function": null
+    },
+    {
+      "hash": "0x425156345baa521e31d5fa9c214f243ede99dd25f8c7bdc112d6028c463d49a9",
+      "contractName": null,
+      "contractAddress": "0x072b4b72e984ff312e7e6ed6f94aea3c08d3f5ab",
+      "function": null
+    },
+    {
+      "hash": "0xc82b8c184047da9be830c1fe9478f012b97b2a9d69dfe3ff0de38f70e533e225",
+      "contractName": null,
+      "contractAddress": "0xc95941be322ba976547aa7950743f5c149cdaa9f",
+      "function": null
+    },
+    {
+      "hash": "0xe1a78c56d00c73c3c223d1b1258af260e283e071973e3a9b5f6be335eadb45f1",
+      "contractName": "PikaRouter",
+      "contractAddress": "0xf626d0228a4c27072774c1660d3141adcd000584",
+      "function": "bindFactory(address)"
+    },
+    {
+      "hash": "0x2c64bc290600a18036b05411557eb9b2c489a5b3d5e589beda20e65126af8c3a",
+      "contractName": "PikaOrderDeployer",
+      "contractAddress": "0x3020d22129fcc0c5092a7f035f7d7fbdc80b7996",
+      "function": "bindFactory(address)"
+    },
+    {
+      "hash": "0x11b8e90bdd9847c68f3ef615cc25fc2250361baa24d9e428301d7c3b7010a6ea",
+      "contractName": "PikaHook",
+      "contractAddress": "0x1a6f3c958d8e98d478ea382a2622a786a3195739",
+      "function": "bindFactory(address)"
+    },
+    {
+      "hash": "0x718a260ac9a3431d72dd140095d07af9a59bf38379e919f5b6aaad1efab52c31",
+      "contractName": "PikaAppRegistry",
+      "contractAddress": "0x93c666e75b5c3770bf08ca908c1c725138ae4f20",
+      "function": "setFactory(address,bool)"
+    },
+    {
+      "hash": "0x0137c26f7cac8a543cf647da06d43fcd19c0cb705d82d46955944be9741dc3de",
+      "contractName": "PikaGuard",
+      "contractAddress": "0x90497a59eeb0b577abadc5d5cb6033a1578ec8c8",
+      "function": "setGuardian(address)"
+    },
+    {
+      "hash": "0xb37131c2dd403fbc9b8ae2dd6bf73a391fb05b655082ecd2e3e0f0b06ed1d835",
+      "contractName": "PikaAppRegistry",
+      "contractAddress": "0x93c666e75b5c3770bf08ca908c1c725138ae4f20",
+      "function": "addTemplate(address,uint8,bytes32,uint16,bool)"
+    },
+    {
+      "hash": "0xced90b0b86b7132df87c8d47029ad31d6d817fce6b72108327bc03a38191435d",
+      "contractName": "PikaAppRegistry",
+      "contractAddress": "0x93c666e75b5c3770bf08ca908c1c725138ae4f20",
+      "function": "addTemplate(address,uint8,bytes32,uint16,bool)"
+    },
+    {
+      "hash": "0xcce87b071203ee5bc14312b0c4f3b552ece9cd10e948ea66c62d5929501104d7",
+      "contractName": "PikaAppRegistry",
+      "contractAddress": "0x93c666e75b5c3770bf08ca908c1c725138ae4f20",
+      "function": "addTemplate(address,uint8,bytes32,uint16,bool)"
+    },
+    {
+      "hash": "0x4d355033234b8490efbd18cf842883b2c018ed4d6b78c0a408cae9369602d25b",
+      "contractName": "PikaAppRegistry",
+      "contractAddress": "0x93c666e75b5c3770bf08ca908c1c725138ae4f20",
+      "function": "setKeeper(address,bool)"
+    },
+    {
+      "hash": "0x1ee4ea01d0f2afe9f0d34e1de13dad5c97c4e47d53ccd2cfddfbd2b01183a0c7",
+      "contractName": null,
+      "contractAddress": "0x08c9768cf1dfddd5cb6de41052d338954bd9e7e7",
+      "function": "setCore(address)"
+    },
+    {
+      "hash": "0x0af4e7472e13f4d148e1c2a9e7515dcfb2ade37d3f08eaafa677e79d46c49135",
+      "contractName": null,
+      "contractAddress": "0x08c9768cf1dfddd5cb6de41052d338954bd9e7e7",
+      "function": "setTokenImplementation(address,bool)"
+    },
+    {
+      "hash": "0xb88339d0ba1c7d50884bb74834a7b2c4b01d7ea2b650b12a4b54e72a71e34ec8",
+      "contractName": null,
+      "contractAddress": "0x08c9768cf1dfddd5cb6de41052d338954bd9e7e7",
+      "function": "configureQuote(address,bool,uint256)"
+    },
+    {
+      "hash": "0x76acdb856df72a7381a6f8532226260af8cb483cd4790ce520c90b94673965e6",
+      "contractName": null,
+      "contractAddress": "0x08c9768cf1dfddd5cb6de41052d338954bd9e7e7",
+      "function": "configureQuote(address,bool,uint256)"
+    },
+    {
+      "hash": "0xa01c8cb55b911ea17c58939b7d1c00e40b5663bb4ad24ddc8786e5585093d5cb",
+      "contractName": "PikaTradeLens",
+      "contractAddress": "0xd514b39216c3baafbe05f98bd16f25e5c8bb928e",
+      "function": null
+    },
+    {
+      "hash": "0x158788d9292eb9096bf8742f63b98b73a4b755cfd3c672f9099ee204da94a10f",
+      "contractName": "TimelockController",
+      "contractAddress": "0xf466eaf2e084794d29f1dfaaa845886578ebc8e9",
+      "function": null
+    },
+    {
+      "hash": "0xb3d78f11e1357876f7232ea81101c04984d343de7dc2ca5367aa76f0a812fb44",
+      "contractName": null,
+      "contractAddress": "0x08c9768cf1dfddd5cb6de41052d338954bd9e7e7",
+      "function": "transferOwnership(address)"
+    },
+    {
+      "hash": "0x1f18abf4a9d55586ac74239671dc4d0c96f0e845ee4159731b83527cc3c84d09",
+      "contractName": "PikaAppRegistry",
+      "contractAddress": "0x93c666e75b5c3770bf08ca908c1c725138ae4f20",
+      "function": "transferOwnership(address)"
+    },
+    {
+      "hash": "0x77687f6abc2607d14f8de5278e5f93579831cd390d75e43c7265bb5d8ac1f1ca",
+      "contractName": "PikaGuard",
+      "contractAddress": "0x90497a59eeb0b577abadc5d5cb6033a1578ec8c8",
+      "function": "transferOwnership(address)"
+    },
+    {
+      "hash": "0x3dd27b5a97d7089001a1e1b43362dacf353fbaf45aa6dae3e0fc4eb735342b28",
+      "contractName": "TimelockController",
+      "contractAddress": "0xf466eaf2e084794d29f1dfaaa845886578ebc8e9",
+      "function": "scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)"
+    },
+    {
+      "hash": "0x80b01169956993f263bd8c706e8651ff5b492095e522ffad2d00a57052639eb7",
+      "contractName": "TimelockController",
+      "contractAddress": "0xf466eaf2e084794d29f1dfaaa845886578ebc8e9",
+      "function": "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)"
+    }
+  ],
+  "receiptsOk": 36,
+  "totalTransactions": 36
+}

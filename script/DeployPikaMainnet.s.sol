@@ -76,27 +76,31 @@ interface IOpenFourMainnetCore {
 ///      `deploy(Config)` runs the same deployment for any configuration, which is how the fork test drives it.
 contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup {
     // =================================================================================================================
-    // CONFIG: fill in before running. Placeholders are address(0); run() refuses while any of them is still zero.
+    // CONFIG: run() refuses while any of these is address(0). Filled in 2026-11-12 (user decision): one 2-of-3 Safe
+    // (v1.3.0) holds all three Safe seats and the guardian seat; the keeper is the deployer wallet, whose v11 keeper
+    // was stopped on 2026-11-12 so the two never share a nonce.
     // =================================================================================================================
 
     /// @dev Platform admin Safe (must be a deployed Safe): proposer, executor and canceller of the owner timelock,
     ///      which owns the factory and the app registry.
-    address internal constant OWNER_SAFE = address(0);
+    address internal constant OWNER_SAFE = 0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877;
     /// @dev Platform treasury (must be a deployed Safe; may equal OWNER_SAFE): receives every platform fee, the
-    ///      platform's cut of project fees and the quote a graduation leaves over (claimed from the factory). Fixed in
-    ///      the factory for good.
-    address internal constant TREASURY_SAFE = address(0);
+    ///      platform's cut of project fees and the quote a graduation leaves over (claimed from the factory). The owner
+    ///      may move it later (`proposeTreasury`, then the new treasury's `acceptTreasury`).
+    address internal constant TREASURY_SAFE = 0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877;
     /// @dev Template upgrade Safe (must be a deployed Safe; may equal OWNER_SAFE): proposer, executor and canceller
     ///      of the template upgrade timelock, the only account that may upgrade app templates (existing launches
     ///      included).
-    address internal constant UPGRADE_PROPOSER_SAFE = address(0);
+    address internal constant UPGRADE_PROPOSER_SAFE = 0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877;
     /// @dev Keeper hot wallet (server worker key): the app registry's keeper, the only account that may run the fee
-    ///      sinks' trading entries (burn buybacks, liquidity adds).
-    address internal constant KEEPER = address(0);
+    ///      sinks' trading entries (burn buybacks, liquidity adds). May be the deployer wallet (2026-11-12), which
+    ///      then keeps this one role after the deployment; it must not be a Safe.
+    address internal constant KEEPER = 0x954BEcdbCf363e143A013169cc5168Fcd270Ba25;
     /// @dev Emergency account (an on-call Safe with a low threshold, or a hardware wallet; not required to be a Safe):
     ///      the guardian in PikaGuard. It can only tighten, so a lost key costs at most a stop the owner lifts
-    ///      (after OWNER_TIMELOCK_DELAY). Must differ from both Safes and from every hot key.
-    address internal constant GUARDIAN = address(0);
+    ///      (after OWNER_TIMELOCK_DELAY). May be one of the Safes (2026-11-12: then a stop needs that Safe's
+    ///      signatures, the same as any owner call while the delay is 0); must differ from the deployer and the keeper.
+    address internal constant GUARDIAN = 0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877;
 
     /// @dev Delay of every owner call (factory, app registry, guard). User decision 2026-11-01, reaffirmed 2026-11-08
     ///      (review 2026-11-07c, T-9): 0 while the deployment settles, to be raised to 24 hours afterwards. A running
@@ -273,7 +277,7 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         _requireSafe(cfg.ownerSafe, "OWNER_SAFE", cfg.minSafeThreshold);
         _requireSafe(cfg.upgradeProposerSafe, "UPGRADE_PROPOSER_SAFE", cfg.minSafeThreshold);
         _requireSafe(cfg.treasury, "TREASURY_SAFE", cfg.minSafeThreshold);
-        // The deployer and the keeper are separate hot keys, and neither is one of the Safes.
+        // The deployer and the keeper are hot keys (they may be the same wallet, 2026-11-12), and neither is a Safe.
         address[2] memory hot = [cfg.deployer, cfg.keeper];
         for (uint256 i; i < hot.length; ++i) {
             require(
@@ -281,12 +285,7 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
                 "deployer and KEEPER must not be a Safe"
             );
         }
-        require(cfg.deployer != cfg.keeper, "deployer and KEEPER must differ");
-        // The guardian is its own key: neither Safe (their timelocks already hold every power) nor a hot key.
-        require(
-            cfg.guardian != cfg.ownerSafe && cfg.guardian != cfg.upgradeProposerSafe && cfg.guardian != cfg.treasury,
-            "GUARDIAN must not be one of the Safes"
-        );
+        // The guardian may be one of the Safes (2026-11-12), but never a hot key: a server key could stop launches.
         for (uint256 i; i < hot.length; ++i) {
             require(cfg.guardian != hot[i], "GUARDIAN must differ from the deployer and the keeper");
         }
@@ -454,7 +453,8 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         require(r.keepers(cfg.keeper), "keeper not set");
     }
 
-    /// @dev Every owner and upgrade role sits with a timelock run by a Safe; the deployer keeps none.
+    /// @dev Every owner and upgrade role sits with a timelock run by a Safe; the deployer keeps none, except the keeper
+    ///      role when it is the keeper.
     function _verifyRoles(Config memory cfg, Deployment memory d) internal view {
         TimelockController owner = d.ownerTimelock;
         TimelockController upgrade = d.apps.upgradeTimelock;
@@ -484,7 +484,7 @@ contract DeployPikaMainnetScript is Script, PikaTimelockHandover, PikaAppsSetup 
         }
         _requireTimelockRoles(owner, cfg.ownerSafe, cfg.deployer);
         _requireTimelockRoles(upgrade, cfg.upgradeProposerSafe, cfg.deployer);
-        require(!d.apps.registry.keepers(cfg.deployer), "deployer kept the keeper role");
+        require(cfg.deployer == cfg.keeper || !d.apps.registry.keepers(cfg.deployer), "deployer kept the keeper role");
     }
 
     /// @dev Interim: `deployer` proposes, executes and cancels; the timelock still administers itself.
