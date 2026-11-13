@@ -26,7 +26,7 @@ immutables written at construction. Every address, role and transaction hash is 
 | `upsertPreset` | vault / curve / trade: the listed standard `VAULT_BASIC` / `CURVE_BONDING` / `TRADE_SIMPLE`; `customDataId` 0; validator the hub `0x08C9768cf1DfddD5CB6de41052D338954Bd9e7e7`; author `0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877`; `active`, `createEnabled` |
 | `FeeRouter.setPresetFeeConfig` | protocol 0.5% + developer 0.5% (as Creator Incentives), partner share 50% |
 
-Once listed, the owner timelock runs the hub's `setPreset(<preset id>, true)`; creation opens after that.
+The preset id is `1778027615737` (author `0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877`). On 2026-11-13 the Safe ran the hub's `setPreset(1778027615737, true)` through the owner timelock (tx [`0xb40370ca…3c545f`](https://bscscan.com/tx/0xb40370cabaec45272b606d18f72af5a26317a2d7a3d67d4ddf6527f2a43c545f), block 133283662); creation opens once Four.meme lists the preset in the Registry.
 
 **Other contracts**: owner timelock `0xf466Eaf2E084794d29F1dfAaa845886578EbC8e9`, template upgrade timelock
 `0x0539668f5B8820c2d2151a035C848Ba5F836619C` (both delays 0; proposer, executor and canceller are the 2-of-3 Safe

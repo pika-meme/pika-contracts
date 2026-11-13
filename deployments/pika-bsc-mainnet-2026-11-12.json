@@ -1,5 +1,5 @@
 {
-  "note": "Pika protocol v12 (contracts v13.0.0 sources) on BSC mainnet, deployed 2026-11-12 by script/DeployPikaMainnet.s.sol run(). The OpenFour preset is not listed yet (presetId null); the owner timelock accepts it with setPreset once Four.meme lists it.",
+  "note": "Pika protocol v12 (contracts v13.0.0 sources) on BSC mainnet, deployed 2026-11-12 by script/DeployPikaMainnet.s.sol run(). Preset id 1778027615737 (author 0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877) was accepted on the hub by the owner timelock on 2026-11-13 (setPresetTx); the Registry entry is Four.meme's to publish.",
   "chainId": 56,
   "sourceCommit": "johnyjt/pika 35f2b39",
   "script": "script/DeployPikaMainnet.s.sol:DeployPikaMainnetScript (run)",
@@ -61,7 +61,12 @@
         "fees": "protocol 50 bps + developer 50 bps, partner share 50%"
       }
     },
-    "presetId": null
+    "presetId": "1778027615737",
+    "setPresetTx": {
+      "hash": "0xb40370cabaec45272b606d18f72af5a26317a2d7a3d67d4ddf6527f2a43c545f",
+      "block": 133283662,
+      "calls": "Safe batch: TimelockController.schedule + execute of PikaLaunchFactory.setPreset(1778027615737, true), predecessor 0, salt 0, delay 0"
+    }
   },
   "firstBlock": "0x7f0161d",
   "lastBlock": "0x7f016ac",

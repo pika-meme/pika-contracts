@@ -20,7 +20,7 @@
 | `upsertPreset` | vault / curve / trade 用官方已登记的 `VAULT_BASIC` / `CURVE_BONDING` / `TRADE_SIMPLE`；`customDataId` 0；validator 为中枢 `0x08C9768cf1DfddD5CB6de41052D338954Bd9e7e7`；author 为 `0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877`；`active`、`createEnabled` |
 | `FeeRouter.setPresetFeeConfig` | 协议 0.5% + 开发者 0.5%（同 Creator Incentives），合作方分成 50% |
 
-登记后由 owner timelock 执行中枢的 `setPreset(<组合 id>, true)`，之后才能创建。
+组合 id 为 `1778027615737`（作者 `0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877`）。2026-11-13 Safe 经 owner timelock 执行了中枢的 `setPreset(1778027615737, true)`（交易 [`0xb40370ca…3c545f`](https://bscscan.com/tx/0xb40370cabaec45272b606d18f72af5a26317a2d7a3d67d4ddf6527f2a43c545f)，块 133283662）；Four.meme 在 Registry 登记该组合后即可创建。
 
 **其他合约**：owner timelock `0xf466Eaf2E084794d29F1dfAaa845886578EbC8e9`、模板升级 timelock `0x0539668f5B8820c2d2151a035C848Ba5F836619C`（延迟都是 0，提议、执行、取消角色都是 2/3 Safe `0xcc9C0956fF06efE7CA9F6B44fF68B2161C0Aa877`，它也是金库和 guardian）、`PikaGuard` `0x90497a59EEb0B577AbaDC5d5Cb6033a1578EC8C8`、应用登记表 `0x93c666e75b5c3770bF08cA908c1C725138ae4f20`（keeper 为部署钱包 `0x954BEcdbCf363e143A013169cc5168Fcd270Ba25`）、回购销毁 `0x4C79D5e1A2e939d840912c7a4F2bD472E9b43c42`、持币分红 `0x39e6101A68547B458eEd54D5f83617F77844f3dd`、加池子 `0xC573F6DC36fEFbE427710001C35131fc6ECB070E`、Router `0xf626d0228A4c27072774C1660d3141ADCD000584`、Hook `0x1A6F3c958d8E98d478eA382a2622A786A3195739`、订单部署器 `0x3020d22129FCC0c5092a7F035F7d7FBdc80b7996`、TradeLens `0xD514b39216C3BaafbE05f98bd16F25E5c8Bb928E`；仓位合约是 Pancake 官方 `CLPositionManager` `0x55f4c8abA71A1e923edC303eb4fEfF14608cC226`。OpenFour 主网 Registry `0x912CEf0C3aE9Ab6eB3Ec87cab69371cFb317Ab94`、Core `0xebe7b6C1089D9F72aD07f34E36d898e44E5e27f3`。
 
